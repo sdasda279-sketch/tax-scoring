@@ -6,12 +6,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from taxscoring import plots
-from taxscoring.features import FEATURE_LABELS
-from taxscoring.data_generator import REGIONS, SECTORS, LEGAL
-from taxscoring.ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
-from taxscoring.report import passport_pdf, to_excel
-from taxscoring.scoring import classify, contributions, recommendations, rule_score, to_scale
+import plots
+from features import FEATURE_LABELS
+from data_generator import REGIONS, SECTORS, LEGAL
+from ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
+from report import passport_pdf, to_excel
+from scoring import classify, contributions, recommendations, rule_score, to_scale
 
 st.set_page_config(page_title="Tax Scoring", page_icon="📊", layout="wide")
 

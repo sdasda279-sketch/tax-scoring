@@ -2,8 +2,8 @@
 Ishga tushirish:  python main.py [--n 3000]"""
 import argparse
 import pandas as pd
-from taxscoring.data_generator import generate
-from taxscoring.ml_model import score_dataset, train_all
+from data_generator import generate
+from ml_model import score_dataset, train_all
 
 
 def run(n=3000, seed=42, use_existing=False):
