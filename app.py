@@ -43,10 +43,36 @@ RAW_COLS = ["stir", "name", "region", "sector", "legal_form", "years_active", "e
             "net_profit", "total_assets", "equity", "current_assets", "current_liabilities", "tax_accrued",
             "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer"]
 
+COL_UZ = {
+    "stir": "STIR", "name": "Korxona nomi", "region": "Hudud", "sector": "Tarmoq",
+    "legal_form": "Tashkiliy shakl", "years_active": "Faoliyat yoshi (yil)", "employees": "Xodimlar soni",
+    "revenue": "Aylanma (mln so'm)", "net_profit": "Sof foyda (mln so'm)",
+    "tax_accrued": "Hisoblangan soliq (mln so'm)", "tax_debt": "Soliq qarzi (mln so'm)",
+    "late_payments_count": "Kechikkan to'lovlar soni", "avg_delay_days": "O'rtacha kechikish (kun)",
+    "rule_score": "Scorecard bali", "pd": "Qarzdorlik xavfi, %", "final_score": "Yakuniy ball",
+    "risk_class": "Xavf sinfi",
+}
+
+
+def view(d, cols):
+    """Jadvalni foydalanuvchi uchun tayyorlash: o'zbekcha ustunlar, yaxlitlangan raqamlar."""
+    v = d[cols].copy()
+    for c in ("rule_score", "final_score"):
+        if c in v:
+            v[c] = v[c].round(0).astype(int)
+    if "pd" in v:
+        v["pd"] = (v["pd"] * 100).round(1)
+    for c in ("revenue", "net_profit", "tax_accrued", "tax_debt", "avg_delay_days"):
+        if c in v:
+            v[c] = v[c].round(1)
+    return v.rename(columns=COL_UZ)
+
+
 st.sidebar.title("📊 Tax Scoring")
 st.sidebar.caption("Yuridik shaxslarning soliq qarzdorligi va moliyaviy ishonchliligini baholash axborot tizimi")
 page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "Yangi korxona (what-if)",
-                                   "Korxonalar ro'yxati", "Erta ogohlantirish", "Modellar taqqoslash", "Tizim haqida"])
+                                   "Korxonalar ro'yxati", "Erta ogohlantirish", "Modellar taqqoslash",
+                                   "Raqamlar izohi", "Tizim haqida"])
 st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yaratilgan.")
 
 
@@ -90,7 +116,7 @@ if page == "Dashboard":
     a.subheader("Tarmoqlar bo'yicha o'rtacha ball"); a.pyplot(plots.sector_bar(df))
     b.subheader("Hududlar: yuqori xavfli korxonalar ulushi"); b.pyplot(plots.region_bar(df))
     st.subheader("Eng yuqori soliq qarzi bo'lgan 10 ta korxona")
-    st.dataframe(df.nlargest(10, "tax_debt")[["stir", "name", "region", "sector", "tax_debt", "final_score", "risk_class"]],
+    st.dataframe(view(df.nlargest(10, "tax_debt"), ["stir", "name", "region", "sector", "tax_debt", "final_score", "risk_class"]),
                  hide_index=True, use_container_width=True)
 
 # ---------------------------------- STIR BO'YICHA ----------------------------------
@@ -157,8 +183,9 @@ elif page == "Korxonalar ro'yxati":
     show = ["stir", "name", "region", "sector", "revenue", "tax_debt", "late_payments_count",
             "rule_score", "pd", "final_score", "risk_class"]
     st.write(f"Topildi: **{len(f):,}** ta korxona")
-    st.dataframe(f[show].sort_values("final_score"), hide_index=True, use_container_width=True)
-    st.download_button("⬇️ Excelga yuklash", to_excel(f[show]), file_name="korxonalar.xlsx",
+    st.caption("Eng past ballli (eng xavfli) korxonalar tepada. Ustunlar izohi: «Raqamlar izohi» bo'limida.")
+    st.dataframe(view(f.sort_values("final_score"), show), hide_index=True, use_container_width=True)
+    st.download_button("⬇️ Excelga yuklash", to_excel(view(f.sort_values("final_score"), show)), file_name="korxonalar.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ---------------------------------- ERTA OGOHLANTIRISH ----------------------------------
@@ -168,10 +195,10 @@ elif page == "Erta ogohlantirish":
     thr = st.slider("PD chegarasi", 0.10, 0.60, 0.25, 0.01)
     w = df[(df["pd"] >= thr) & (df["risk_class"] != "Yuqori xavf")].sort_values("pd", ascending=False)
     st.metric("Aniqlangan korxonalar", len(w))
-    st.dataframe(w[["stir", "name", "region", "sector", "tax_debt", "late_payments_count", "final_score", "pd", "risk_class"]],
-                 hide_index=True, use_container_width=True)
+    wcols = ["stir", "name", "region", "sector", "tax_debt", "late_payments_count", "final_score", "pd", "risk_class"]
+    st.dataframe(view(w, wcols), hide_index=True, use_container_width=True)
     if len(w):
-        st.download_button("⬇️ Ro'yxatni Excelga yuklash", to_excel(w), file_name="erta_ogohlantirish.xlsx",
+        st.download_button("⬇️ Ro'yxatni Excelga yuklash", to_excel(view(w, wcols)), file_name="erta_ogohlantirish.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ---------------------------------- MODELLAR ----------------------------------
@@ -179,8 +206,13 @@ elif page == "Modellar taqqoslash":
     st.title("Modellar taqqoslash")
     st.caption(f"Test to'plami: {meta['n_test']} ta korxona. Xavfli qarzdorlik ulushi: {meta['default_rate']:.1%}. "
                f"ML uchun tanlangan model (CV AUC bo'yicha): **{meta['best']}**")
-    m = pd.DataFrame(meta["metrics"]).T
+    m = pd.DataFrame(meta["metrics"]).T.rename(columns={
+        "Accuracy": "To'g'ri javoblar ulushi", "Precision": "Topilganlar aniqligi (Precision)",
+        "Recall": "Qamrab olish (Recall)", "Brier": "Brier xatosi (kam = yaxshi)",
+        "CV_AUC_mean": "AUC (5 marta o'zaro tekshiruv)"})
     st.dataframe(m.round(3), use_container_width=True)
+    st.caption("AUC, Gini, KS qancha yuqori bo'lsa model xavfli va xavfsiz korxonalarni shuncha yaxshi ajratadi. "
+               "Batafsil: «Raqamlar izohi» bo'limi.")
     a, b = st.columns(2)
     a.subheader("ROC egri chiziqlari"); a.pyplot(plots.roc_plot(meta))
     b.subheader("Belgilar muhimligi"); b.pyplot(plots.importance_bar(meta))
@@ -188,6 +220,68 @@ elif page == "Modellar taqqoslash":
     g = df.groupby("risk_class")["default_next_year"].agg(["count", "mean"]).reindex(list(plots.COLORS))
     g.columns = ["Korxonalar soni", "Xavfli qarzdorlik ulushi"]
     st.dataframe(g.style.format({"Xavfli qarzdorlik ulushi": "{:.1%}"}), use_container_width=True)
+
+# ---------------------------------- RAQAMLAR IZOHI ----------------------------------
+elif page == "Raqamlar izohi":
+    st.title("Raqamlar nimani anglatadi?")
+    st.markdown("""
+### 1. Yakuniy ball (300–850)
+Korxonaning **ishonchlilik bali**. Bank kreditlash skoringiga o'xshaydi: **ball qancha yuqori bo'lsa, korxona shuncha ishonchli**.
+- **630 va undan yuqori**: past xavf, soliq intizomi yaxshi.
+- **493–630**: o'rtacha xavf, e'tibor kerak.
+- **493 dan past**: yuqori xavf, qarzdorlik ehtimoli katta.
+
+### 2. Xavf sinfi
+Ballga qarab korxona uch guruhdan biriga kiradi:
+| Sinf | Ma'nosi | Tizimdagi haqiqiy qarzdorlik ulushi |
+|---|---|---|
+| 🟢 Past xavf | Soliqni o'z vaqtida to'laydi, moliyaviy holati yaxshi | taxminan 4% |
+| 🟡 O'rtacha xavf | Ba'zi muammolar bor, kuzatish kerak | taxminan 10% |
+| 🔴 Yuqori xavf | Qarzdorlik va kechikishlar ko'p, moliyaviy holati zaif | taxminan 36% |
+
+### 3. Scorecard bali
+**Ekspert qoidalari** bo'yicha hisoblangan ball. Olti ko'rsatkich vaznlar bilan baholanadi:
+soliq qarzi/aylanma (25%), to'lov intizomi (20%), joriy likvidlik (15%), avtonomlik (15%), rentabellik (15%),
+hisobotlarni o'z vaqtida topshirish (10%). Tekshiruvda qoidabuzarlik topilsa, ball kamayadi.
+Qoidalarni inson tushunadi va tekshira oladi, shuning uchun bu model **shaffof**.
+
+### 4. Qarzdorlik xavfi, % (PD, Probability of Default)
+**Mashinaviy o'qitish modeli** hisoblagan ehtimollik: korxona **keyingi yilda xavfli qarzdorga aylanish** ehtimoli.
+Masalan, 95% degani: 100 ta shunday korxonadan taxminan 95 tasi muammoli bo'ladi. 2% degani: deyarli xavfsiz.
+
+### 5. Ular qanday birlashadi
+**Yakuniy ball = 50% scorecard + 50% ML modeli.** Ikki yondashuv bir-birini to'ldiradi:
+scorecard tushunarli, ML esa murakkab bog'liqliklarni ushlaydi.
+
+### 6. Jadvaldagi ustunlar
+- **STIR**: soliq to'lovchining identifikatsiya raqami (9 xonali).
+- **Aylanma**: yillik tushum, mln so'mda.
+- **Soliq qarzi**: to'lanmagan soliq summasi, mln so'mda.
+- **Kechikkan to'lovlar soni**: oxirgi 12 oyda soliqni kechiktirib to'lash holatlari (0 dan 12 gacha).
+- **Hisoblangan soliq**: yil davomida to'lanishi kerak bo'lgan soliq.
+
+### 7. Moliyaviy koeffitsientlar
+- **Joriy likvidlik** = joriy aktivlar / joriy majburiyatlar. 1.5 dan yuqori bo'lsa yaxshi: korxona qisqa muddatli qarzlarini yopa oladi.
+- **Avtonomlik** = o'z kapitali / jami aktivlar. 0.4–0.5 dan yuqori bo'lsa yaxshi: korxona qarzga kam tayanadi.
+- **Rentabellik** = sof foyda / aylanma. Foizlarda: aylanmaning qancha qismi foyda bo'lib qolishi.
+- **Soliq qarzi / aylanma**: qarz yillik tushumning qancha ulushini tashkil etishi. Kichik bo'lgani yaxshi.
+
+### 8. Misol: jadvaldagi birinchi qator
+*"Registon Logistik" MChJ*: 12 oyning har 12 tasida to'lovni kechiktirgan (**12**), soliq qarzi **345 mln so'm**,
+scorecard bali **320**, qarzdorlik xavfi **95%**, yakuniy ball **310**.
+Xulosa: **yuqori xavf**. Bunday korxona soliq organi e'tiborida bo'lishi kerak.
+
+### 9. Modellar sifati ko'rsatkichlari (Modellar taqqoslash bo'limi)
+- **AUC** (0.5 dan 1 gacha): model xavfli va xavfsiz korxonalarni qanchalik yaxshi ajratishi. 0.5 = tasodifiy taxmin, 1 = mukammal. **0.85 dan yuqori juda yaxshi hisoblanadi.**
+- **Gini** = 2×AUC − 1. Bank skoringida keng ishlatiladi. 0.7 va undan yuqori kuchli model.
+- **KS** (0 dan 1 gacha): xavfli va xavfsiz guruhlar orasidagi eng katta farq. 0.4 dan yuqori yaxshi.
+- **Qamrab olish (Recall)**: haqiqiy qarzdorlarning qanchasi topilgani.
+- **Topilganlar aniqligi (Precision)**: "xavfli" deb belgilanganlarning qanchasi haqiqatan xavfli bo'lgani.
+- **F1**: Precision va Recall o'rtasidagi muvozanat.
+- **Brier xatosi**: ehtimollik bahosining aniqligi, 0 ga yaqin bo'lgani yaxshi.
+
+> ⚠️ Barcha korxonalar sintetik (sun'iy) ma'lumot. Raqamlar tizimning ishlash tamoyilini ko'rsatadi, haqiqiy korxonalarga tegishli emas.
+""")
 
 # ---------------------------------- HAQIDA ----------------------------------
 else:
