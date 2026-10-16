@@ -103,8 +103,13 @@ def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.Dat
     pre = rng.choice(PREFIX, n)
     name = [f'"{p} {SECTOR_WORD[s]}" {l}' for p, s, l in zip(pre, sec, legal)]
 
+    rng2 = np.random.default_rng(seed + 1000)  # aloqa ma'lumotlari uchun alohida oqim
+    ops = np.array(["90", "91", "93", "94", "95", "97", "98", "99", "33", "88", "77"])
+    phone = [f"+998{o}{rng2.integers(1_000_000, 9_999_999)}" for o in rng2.choice(ops, n)]
+    email = [f"info{str(s_)[-5:]}@example.com" for s_ in stir]
+
     return pd.DataFrame({
-        "stir": stir.astype(str), "name": name, "region": region, "sector": sec,
+        "stir": stir.astype(str), "name": name, "phone": phone, "email": email, "region": region, "sector": sec,
         "legal_form": legal, "years_active": years, "employees": employees,
         "revenue": revenue.round(1), "net_profit": net_profit.round(1),
         "total_assets": total_assets.round(1), "equity": equity.round(1),

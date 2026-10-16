@@ -10,13 +10,21 @@ import plots
 from features import FEATURE_LABELS
 from data_generator import REGIONS, SECTORS, LEGAL
 from ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
+from notifier import build_email, build_sms, channel_ready, dispatch, load_config, sms_segments
 from report import passport_pdf, to_excel
 from scoring import classify, contributions, recommendations, rule_score, to_scale
 
 st.set_page_config(page_title="Tax Scoring", page_icon="📊", layout="wide")
 
 # ---------- ma'lumotlarni yuklash (yo'q bo'lsa avtomatik yaratiladi) ----------
-if not Path("data/scored_companies.csv").exists() or not Path("models/metrics.json").exists():
+def _needs_build():
+    p = Path("data/scored_companies.csv")
+    if not p.exists() or not Path("models/metrics.json").exists():
+        return True
+    return "phone" not in pd.read_csv(p, nrows=0).columns
+
+
+if _needs_build():
     with st.spinner("Birinchi ishga tushirish: ma'lumotlar yaratilmoqda va modellar o'qitilmoqda..."):
         import main as pipeline
         Path("data").mkdir(exist_ok=True); Path("models").mkdir(exist_ok=True)
@@ -71,8 +79,8 @@ def view(d, cols):
 st.sidebar.title("📊 Tax Scoring")
 st.sidebar.caption("Yuridik shaxslarning soliq qarzdorligi va moliyaviy ishonchliligini baholash axborot tizimi")
 page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "Yangi korxona (what-if)",
-                                   "Korxonalar ro'yxati", "Erta ogohlantirish", "Modellar taqqoslash",
-                                   "Raqamlar izohi", "Tizim haqida"])
+                                   "Korxonalar ro'yxati", "Erta ogohlantirish", "Ogohlantirish yuborish",
+                                   "Modellar taqqoslash", "Raqamlar izohi", "Tizim haqida"])
 st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yaratilgan.")
 
 
@@ -133,7 +141,7 @@ elif page == "Korxonani tekshirish (STIR)":
                 f"{len(m)} ta natija", m.index[:50], format_func=lambda i: f"{df.loc[i, 'stir']} — {df.loc[i, 'name']}")
             r = df.loc[idx]
             st.header(f"{r['name']}  ·  STIR {r['stir']}")
-            st.caption(f"{r['region']} · {r['sector']} · {r['legal_form']} · {r['years_active']} yil")
+            st.caption(f"{r['region']} · {r['sector']} · {r['legal_form']} · {r['years_active']} yil · {r['phone']} · {r['email']}")
             show_company(r, df.loc[[idx], RAW_COLS])
             st.download_button("📄 Soliq pasportini yuklab olish (PDF)", passport_pdf(r),
                                file_name=f"soliq_pasporti_{r['stir']}.pdf", mime="application/pdf")
@@ -200,6 +208,77 @@ elif page == "Erta ogohlantirish":
     if len(w):
         st.download_button("⬇️ Ro'yxatni Excelga yuklash", to_excel(view(w, wcols)), file_name="erta_ogohlantirish.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ---------------------------------- OGOHLANTIRISH YUBORISH ----------------------------------
+elif page == "Ogohlantirish yuborish":
+    st.title("Korxonalarga ogohlantirish yuborish")
+    cfg = load_config(st.secrets)
+    if "notif_log" not in st.session_state:
+        st.session_state["notif_log"] = []
+    st.info("Hozirgi rejim: **SIMULYATSIYA**. Xabarlar shakllantiriladi va jurnalga yoziladi, lekin hech kimga yuborilmaydi. "
+            "Haqiqiy yuborish uchun SMS-provayder (Eskiz) yoki email kalitlari sozlanishi kerak. Korxonalar sintetik, "
+            "shuning uchun haqiqiy yuborishni faqat o'zingizning test raqamingizga sinang.")
+
+    a, b, c = st.columns(3)
+    risk = a.multiselect("Xavf sinfi", list(plots.COLORS), default=["Yuqori xavf"])
+    min_debt = b.number_input("Soliq qarzi kamida (mln so'm)", 0.0, 100000.0, 0.0, step=10.0)
+    reg = c.multiselect("Hudud", sorted(df["region"].unique()))
+    tgt = df[df["risk_class"].isin(risk) & (df["tax_debt"] >= min_debt)]
+    if reg:
+        tgt = tgt[tgt["region"].isin(reg)]
+    tgt = tgt.sort_values("final_score")
+    st.metric("Ogohlantirish yuboriladigan korxonalar", f"{len(tgt):,}")
+
+    a, b = st.columns(2)
+    channel = a.radio("Kanal", ["SMS", "Email"], horizontal=True)
+    skip_done = b.checkbox("Avval ogohlantirilganlarni o'tkazib yuborish", value=True)
+    done = {(x["STIR"], x["Kanal"]) for x in st.session_state["notif_log"]}
+    if skip_done:
+        tgt = tgt[[(r, channel) not in done for r in tgt["stir"]]]
+
+    if len(tgt):
+        st.subheader("Xabarni oldindan ko'rish")
+        pick = st.selectbox("Korxona", tgt.index[:100],
+                            format_func=lambda i: f"{tgt.loc[i, 'stir']} — {tgt.loc[i, 'name']} (ball {tgt.loc[i, 'final_score']:.0f})")
+        r = tgt.loc[pick]
+        if channel == "SMS":
+            txt = build_sms(r)
+            st.text_area("SMS matni", txt, height=150, disabled=True)
+            st.caption(f"{len(txt)} belgi = {sms_segments(txt)} ta SMS | Qabul qiluvchi: {r['phone']}")
+        else:
+            subj, body = build_email(r)
+            st.text_input("Mavzu", subj, disabled=True)
+            st.text_area("Xat matni", body, height=300, disabled=True)
+            st.caption(f"Qabul qiluvchi: {r['email']}")
+
+        st.subheader("Yuborish")
+        limit = st.slider("Bir martada nechta xabar", 1, min(200, len(tgt)), min(20, len(tgt)))
+        ready = channel_ready(channel, cfg)
+        live = st.checkbox("Haqiqiy yuborish", value=False, disabled=not ready,
+                           help="Faqat kalitlar sozlangan bo'lsa yoqiladi." if not ready else None)
+        override = ""
+        if live:
+            override = st.text_input("Test qabul qiluvchi (barcha xabarlar shu manzilga ketadi)",
+                                     placeholder="+998901234567" if channel == "SMS" else "ism@gmail.com")
+            st.warning("Test qabul qiluvchi bo'sh qoldirilsa, xabarlar korxonalarning o'z manzillariga yuboriladi!")
+        confirm = st.checkbox("Yuborishni tasdiqlayman") if live else True
+        if st.button("📨 Ogohlantirishlarni yuborish", type="primary", disabled=not confirm or (live and not override.strip())):
+            with st.spinner("Yuborilmoqda..."):
+                res = dispatch(tgt.head(limit), channel, cfg, live, override)
+            st.session_state["notif_log"].extend(res)
+            ok = sum(1 for x in res if not x["Holat"].startswith("Xato"))
+            st.success(f"Qayta ishlandi: {len(res)} ta, muvaffaqiyatli: {ok} ta.")
+    else:
+        st.warning("Tanlangan shartlar bo'yicha yuboriladigan korxona yo'q.")
+
+    st.subheader("Yuborish jurnali")
+    if st.session_state["notif_log"]:
+        lg = pd.DataFrame(st.session_state["notif_log"])
+        st.dataframe(lg.drop(columns=["Xabar"]).iloc[::-1], hide_index=True, use_container_width=True)
+        st.download_button("⬇️ Jurnalni Excelga yuklash", to_excel(lg), file_name="ogohlantirish_jurnali.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    else:
+        st.caption("Hali hech narsa yuborilmagan.")
 
 # ---------------------------------- MODELLAR ----------------------------------
 elif page == "Modellar taqqoslash":
