@@ -1,7 +1,7 @@
 """Qoidaga asoslangan (ekspert) skoring modeli.
 
 Har bir ko'rsatkich 0-100 oralig'idagi qismiy ballga o'tkaziladi (bo'lak-chiziqli interpolyatsiya),
-so'ng vaznlar bo'yicha yig'iladi. Yakuniy ball 300-850 shkalasiga o'tkaziladi.
+so'ng vaznlar bo'yicha yig'iladi. Ball 0-100 shkalasida beriladi (100 = eng ishonchli).
 """
 import numpy as np
 import pandas as pd
@@ -37,8 +37,8 @@ def _interp(x, curve):
 
 
 def to_scale(s100):
-    """0-100 -> 300-850"""
-    return 300 + 5.5 * np.asarray(s100, float)
+    """Ball shkalasi: 0-100 (o'zgarishsiz). Boshqa shkala kerak bo'lsa, shu yerda o'zgartiriladi."""
+    return np.asarray(s100, float)
 
 
 def classify(s100):

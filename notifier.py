@@ -50,9 +50,9 @@ def build_sms(r: pd.Series) -> str:
     debt = f"{r['tax_debt']:,.1f}".replace(",", " ")
     if r["risk_class"] == "Yuqori xavf":
         return (f"Hurmatli rahbar! {r['name']} (STIR {r['stir']}) soliq intizomi reytingida YUQORI XAVF guruhida "
-                f"(ball {r['final_score']:.0f}/850). Soliq qarzi: {debt} mln so'm. Asosiy sabab: {reasons}. "
+                f"(ball {r['final_score']:.1f}/100). Soliq qarzi: {debt} mln so'm. Asosiy sabab: {reasons}. "
                 f"Qarzni bartaraf etish uchun soliq inspeksiyasiga murojaat qiling.")
-    return (f"Hurmatli rahbar! {r['name']} (STIR {r['stir']}) soliq intizomi reytingi {r['final_score']:.0f}/850 "
+    return (f"Hurmatli rahbar! {r['name']} (STIR {r['stir']}) soliq intizomi reytingi {r['final_score']:.1f}/100 "
             f"(o'rtacha xavf). E'tibor bering: {reasons}. Soliq to'lovlarini o'z vaqtida amalga oshiring.")
 
 
@@ -61,7 +61,7 @@ def build_email(r: pd.Series):
     lines = [f"Hurmatli rahbar!", "",
              f"{r['name']} (STIR {r['stir']}) korxonasi soliq intizomi va moliyaviy ishonchlilik reytingi bo'yicha "
              f"quyidagi natijaga ega:", "",
-             f"  Yakuniy ball: {r['final_score']:.0f} / 850", f"  Xavf sinfi: {r['risk_class']}",
+             f"  Yakuniy ball: {r['final_score']:.1f} / 100", f"  Xavf sinfi: {r['risk_class']}",
              f"  Soliq qarzi: {r['tax_debt']:,.1f} mln so'm",
              f"  Oxirgi 12 oyda kechikkan to'lovlar: {int(r['late_payments_count'])}", "",
              "Reytingga eng ko'p ta'sir qilgan omillar va tavsiyalar:"]
@@ -124,5 +124,5 @@ def dispatch(rows: pd.DataFrame, channel: str, cfg: dict, live: bool, override_t
                 status = f"Xato: {str(e)[:80]}"
         log.append({"Vaqt": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "STIR": r["stir"], "Korxona": r["name"],
                     "Kanal": channel, "Qabul qiluvchi": to, "Xavf sinfi": r["risk_class"],
-                    "Ball": int(round(r["final_score"])), "Holat": status, "Xabar": text})
+                    "Ball": round(float(r["final_score"]), 1), "Holat": status, "Xabar": text})
     return log

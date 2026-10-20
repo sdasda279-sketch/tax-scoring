@@ -21,7 +21,10 @@ def _needs_build():
     p = Path("data/scored_companies.csv")
     if not p.exists() or not Path("models/metrics.json").exists():
         return True
-    return "phone" not in pd.read_csv(p, nrows=0).columns
+    cols = pd.read_csv(p, nrows=0).columns
+    if "phone" not in cols:
+        return True
+    return pd.read_csv(p, usecols=["final_score"])["final_score"].max() > 100  # eski 300-850 shkala qolgan bo'lsa
 
 
 if _needs_build():
@@ -32,8 +35,14 @@ if _needs_build():
 
 
 @st.cache_data
-def load_scored():
-    return pd.read_csv("data/scored_companies.csv", dtype={"stir": str})
+def load_scored(file_version):
+    """file_version (fayl o'zgargan vaqti) o'zgarsa, kesh yangilanadi."""
+    d = pd.read_csv("data/scored_companies.csv", dtype={"stir": str})
+    if "phone" not in d.columns:  # eski ma'lumot: aloqa ustunlarini STIR'dan hosil qilamiz
+        ops = ["90", "91", "93", "94", "95", "97", "98", "99", "33", "88", "77"]
+        d["phone"] = ["+998" + ops[int(x[-2:]) % 11] + str(1_000_000 + int(x) % 9_000_000) for x in d["stir"]]
+        d["email"] = ["info" + x[-5:] + "@example.com" for x in d["stir"]]
+    return d
 
 
 @st.cache_data
@@ -46,7 +55,7 @@ def get_bundle():
     return load_model()
 
 
-df, meta, bundle = load_scored(), load_meta(), get_bundle()
+df, meta, bundle = load_scored(Path("data/scored_companies.csv").stat().st_mtime), load_meta(), get_bundle()
 RAW_COLS = ["stir", "name", "region", "sector", "legal_form", "years_active", "employees", "revenue",
             "net_profit", "total_assets", "equity", "current_assets", "current_liabilities", "tax_accrued",
             "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer"]
@@ -67,7 +76,7 @@ def view(d, cols):
     v = d[cols].copy()
     for c in ("rule_score", "final_score"):
         if c in v:
-            v[c] = v[c].round(0).astype(int)
+            v[c] = v[c].round(1)
     if "pd" in v:
         v["pd"] = (v["pd"] * 100).round(1)
     for c in ("revenue", "net_profit", "tax_accrued", "tax_debt", "avg_delay_days"):
@@ -86,9 +95,9 @@ st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yarati
 
 def show_company(r: pd.Series, raw_row: pd.DataFrame):
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Yakuniy ball (gibrid)", f"{r['final_score']:.0f}", help="300–850 shkalasi")
+    c1.metric("Yakuniy ball (gibrid)", f"{r['final_score']:.1f}", help="0–100 shkalasi")
     c2.metric("Xavf sinfi", r["risk_class"])
-    c3.metric("Scorecard bali", f"{r['rule_score']:.0f}")
+    c3.metric("Scorecard bali", f"{r['rule_score']:.1f}")
     c4.metric("ML xavf ehtimoli (PD)", f"{r['pd']:.1%}")
     left, right = st.columns(2)
     with left:
@@ -114,7 +123,7 @@ if page == "Dashboard":
     st.title("Umumiy ko'rsatkichlar")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Korxonalar soni", f"{len(df):,}")
-    c2.metric("O'rtacha ball", f"{df['final_score'].mean():.0f}")
+    c2.metric("O'rtacha ball", f"{df['final_score'].mean():.1f}")
     c3.metric("Yuqori xavfli ulush", f"{(df['risk_class'] == 'Yuqori xavf').mean():.1%}")
     c4.metric("Jami soliq qarzi (mlrd so'm)", f"{df['tax_debt'].sum() / 1000:,.1f}")
     a, b = st.columns(2)
@@ -239,7 +248,7 @@ elif page == "Ogohlantirish yuborish":
     if len(tgt):
         st.subheader("Xabarni oldindan ko'rish")
         pick = st.selectbox("Korxona", tgt.index[:100],
-                            format_func=lambda i: f"{tgt.loc[i, 'stir']} — {tgt.loc[i, 'name']} (ball {tgt.loc[i, 'final_score']:.0f})")
+                            format_func=lambda i: f"{tgt.loc[i, 'stir']} — {tgt.loc[i, 'name']} (ball {tgt.loc[i, 'final_score']:.1f})")
         r = tgt.loc[pick]
         if channel == "SMS":
             txt = build_sms(r)
@@ -304,11 +313,11 @@ elif page == "Modellar taqqoslash":
 elif page == "Raqamlar izohi":
     st.title("Raqamlar nimani anglatadi?")
     st.markdown("""
-### 1. Yakuniy ball (300–850)
+### 1. Yakuniy ball (0–100)
 Korxonaning **ishonchlilik bali**. Bank kreditlash skoringiga o'xshaydi: **ball qancha yuqori bo'lsa, korxona shuncha ishonchli**.
-- **630 va undan yuqori**: past xavf, soliq intizomi yaxshi.
-- **493–630**: o'rtacha xavf, e'tibor kerak.
-- **493 dan past**: yuqori xavf, qarzdorlik ehtimoli katta.
+- **60 va undan yuqori**: past xavf, soliq intizomi yaxshi.
+- **35–60**: o'rtacha xavf, e'tibor kerak.
+- **35 dan past**: yuqori xavf, qarzdorlik ehtimoli katta.
 
 ### 2. Xavf sinfi
 Ballga qarab korxona uch guruhdan biriga kiradi:
@@ -347,7 +356,7 @@ scorecard tushunarli, ML esa murakkab bog'liqliklarni ushlaydi.
 
 ### 8. Misol: jadvaldagi birinchi qator
 *"Registon Logistik" MChJ*: 12 oyning har 12 tasida to'lovni kechiktirgan (**12**), soliq qarzi **345 mln so'm**,
-scorecard bali **320**, qarzdorlik xavfi **95%**, yakuniy ball **310**.
+scorecard bali **3.7**, qarzdorlik xavfi **95%**, yakuniy ball **1.8**.
 Xulosa: **yuqori xavf**. Bunday korxona soliq organi e'tiborida bo'lishi kerak.
 
 ### 9. Modellar sifati ko'rsatkichlari (Modellar taqqoslash bo'limi)
@@ -366,7 +375,7 @@ Xulosa: **yuqori xavf**. Bunday korxona soliq organi e'tiborida bo'lishi kerak.
 else:
     st.title("Tizim haqida")
     st.markdown("""
-**Maqsad:** yuridik shaxslarning soliq intizomi va moliyaviy holatiga ko'ra ball (300–850) va xavf sinfini aniqlash.
+**Maqsad:** yuridik shaxslarning soliq intizomi va moliyaviy holatiga ko'ra ball (0–100) va xavf sinfini aniqlash.
 
 **Gibrid yondashuv**
 1. *Scorecard (ekspert model)*: 6 ta ko'rsatkich vaznlar bilan (qarz 25%, to'lov intizomi 20%, likvidlik 15%,

@@ -32,12 +32,12 @@ def passport_pdf(r: pd.Series) -> bytes:
     S.append(Spacer(1, 4))
     col = RISK_COL[r["risk_class"]]
     S.append(Paragraph(
-        f"<font size=26 color='{col}'><b>{r['final_score']:.0f}</b></font> "
-        f"<font size=11>/ 850 &nbsp;&nbsp; <b>{r['risk_class']}</b></font>",
+        f"<font size=26 color='{col}'><b>{r['final_score']:.1f}</b></font> "
+        f"<font size=11>/ 100 &nbsp;&nbsp; <b>{r['risk_class']}</b></font>",
         ParagraphStyle("big", parent=ss["Normal"], leading=36, spaceAfter=4)))
     S.append(Paragraph(
-        f"Qoidaga asoslangan ball: {r['rule_score']:.0f} | ML xavf ehtimoli (PD): {r['pd']:.1%} | "
-        f"Gibrid ball: {r['final_score']:.0f}", ss["Normal"]))
+        f"Qoidaga asoslangan ball: {r['rule_score']:.1f} | ML xavf ehtimoli (PD): {r['pd']:.1%} | "
+        f"Gibrid ball: {r['final_score']:.1f}", ss["Normal"]))
     S.append(Spacer(1, 8))
     info = [["Hudud", r["region"], "Tarmoq", r["sector"]],
             ["Tashkiliy shakl", r["legal_form"], "Faoliyat yoshi", f"{r['years_active']} yil"],

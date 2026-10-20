@@ -15,7 +15,7 @@ def _clean(ax):
 def score_hist(df, col="final_score"):
     fig, ax = plt.subplots(figsize=(6, 3.4))
     ax.hist(df[col], bins=30, color="#4c78a8", edgecolor="white")
-    ax.set_xlabel("Skoring bali (300-850)"); ax.set_ylabel("Korxonalar soni"); _clean(ax)
+    ax.set_xlabel("Skoring bali (0-100)"); ax.set_ylabel("Korxonalar soni"); _clean(ax)
     fig.tight_layout(); return fig
 
 
@@ -33,7 +33,7 @@ def sector_bar(df):
     g = df.groupby("sector")["final_score"].mean().sort_values()
     fig, ax = plt.subplots(figsize=(6, 3.8))
     ax.barh(g.index, g.values, color="#4c78a8")
-    ax.set_xlabel("O'rtacha ball"); ax.set_xlim(300, 850); _clean(ax)
+    ax.set_xlabel("O'rtacha ball"); ax.set_xlim(0, 100); _clean(ax)
     fig.tight_layout(); return fig
 
 
