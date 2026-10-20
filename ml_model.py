@@ -13,7 +13,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_va
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from features import FEATURE_LABELS, MODEL_NUM, build_X
+from features import FEATURE_LABELS, MODEL_NUM, add_ratios, build_X
 from scoring import classify, rule_score, to_scale
 
 TARGET = "default_next_year"
@@ -70,6 +70,18 @@ def train_all(df: pd.DataFrame, out_dir="models", seed=42):
         rocs[name] = {"fpr": fpr.tolist(), "tpr": tpr.tolist()}
         fitted[name] = m
 
+    # Taqqoslash: tovar balansi belgilarisiz Logistic Regression (yangi bo'lim qo'shgan foydani ko'rsatadi)
+    inv_feats = ["has_inventory", "turnover_gap", "stock_ratio", "stock_share"]
+    base_cols = [c for c in cols if c not in inv_feats]
+    mk = MODELS["Logistic Regression"]
+    m0 = mk().fit(Xtr[base_cols], ytr)
+    p0 = m0.predict_proba(Xte[base_cols])[:, 1]
+    r0 = _metrics(yte, p0, float(np.quantile(p0, 1 - ytr.mean())))
+    r0["CV_AUC_mean"] = float(cross_val_score(mk(), X[base_cols], y, cv=cv, scoring="roc_auc").mean())
+    name0 = "Logistic Regression (tovar balansisiz)"
+    results[name0] = r0
+    fpr, tpr, _ = roc_curve(yte, p0); rocs[name0] = {"fpr": fpr.tolist(), "tpr": tpr.tolist()}
+
     # Qoidaga asoslangan model (test to'plamida) va gibrid
     rs = rule_score(df.loc[Xte.index])
     risk_rule = 1 - rs["rule_100"].values / 100
@@ -106,6 +118,9 @@ def score_dataset(df: pd.DataFrame, pd_values) -> pd.DataFrame:
     rs = rule_score(df)
     res = df.copy()
     res = pd.concat([res, rs], axis=1)
+    dd = add_ratios(df)  # tovar balansi ko'rsatkichlari (kutilgan aylanma, farq, qoldiq kunlari ...)
+    for c in ["inv_cogs", "expected_revenue", "turnover_gap", "stock_days", "stock_ratio", "stock_share"]:
+        res[c] = dd[c].values
     res["pd"] = np.asarray(pd_values, float)
     res["ml_100"] = pd_to_ml100(res["pd"])
     res["final_100"] = hybrid_100(res["rule_100"], res["pd"])

@@ -2,7 +2,7 @@
 Ishga tushirish:  python main.py [--n 3000]"""
 import argparse
 import pandas as pd
-from data_generator import generate
+from data_generator import generate_all
 from ml_model import score_dataset, train_all
 
 
@@ -10,8 +10,9 @@ def run(n=3000, seed=42, use_existing=False):
     if use_existing:
         df = pd.read_csv("data/companies.csv", dtype={"stir": str})
     else:
-        df = generate(n, seed)
+        df, goods = generate_all(n, seed)
         df.to_csv("data/companies.csv", index=False)
+        goods.to_csv("data/goods.csv", index=False)
     meta, oof = train_all(df)
     scored = score_dataset(df, oof)
     scored.to_csv("data/scored_companies.csv", index=False)

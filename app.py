@@ -7,12 +7,12 @@ import pandas as pd
 import streamlit as st
 
 import plots
-from features import FEATURE_LABELS
+from features import FEATURE_LABELS, SECTOR_INV
 from data_generator import REGIONS, SECTORS, LEGAL
 from ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
 from notifier import build_email, build_sms, channel_ready, dispatch, load_config, sms_segments
 from report import passport_pdf, to_excel
-from scoring import classify, contributions, recommendations, rule_score, to_scale
+from scoring import classify, contributions, recommendations, rule_score, to_scale, turnover_verdict
 
 st.set_page_config(page_title="Tax Scoring", page_icon="📊", layout="wide")
 
@@ -22,7 +22,7 @@ def _needs_build():
     if not p.exists() or not Path("models/metrics.json").exists():
         return True
     cols = pd.read_csv(p, nrows=0).columns
-    if "phone" not in cols:
+    if "phone" not in cols or "has_inventory" not in cols:
         return True
     return pd.read_csv(p, usecols=["final_score"])["final_score"].max() > 100  # eski 300-850 shkala qolgan bo'lsa
 
@@ -46,6 +46,14 @@ def load_scored(file_version):
 
 
 @st.cache_data
+def load_goods(file_version):
+    p = Path("data/goods.csv")
+    if p.exists():
+        return pd.read_csv(p, dtype={"stir": str})
+    return pd.DataFrame(columns=["stir", "group", "unit", "quantity", "unit_price", "value"])
+
+
+@st.cache_data
 def load_meta():
     return json.loads(Path("models/metrics.json").read_text())
 
@@ -55,10 +63,12 @@ def get_bundle():
     return load_model()
 
 
+goods = load_goods(Path("data/goods.csv").stat().st_mtime if Path("data/goods.csv").exists() else 0)
 df, meta, bundle = load_scored(Path("data/scored_companies.csv").stat().st_mtime), load_meta(), get_bundle()
 RAW_COLS = ["stir", "name", "region", "sector", "legal_form", "years_active", "employees", "revenue",
             "net_profit", "total_assets", "equity", "current_assets", "current_liabilities", "tax_accrued",
-            "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer"]
+            "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer",
+            "has_inventory", "inv_opening_value", "inv_purchases", "inv_closing_value"]
 
 COL_UZ = {
     "stir": "STIR", "name": "Korxona nomi", "region": "Hudud", "sector": "Tarmoq",
@@ -67,7 +77,8 @@ COL_UZ = {
     "tax_accrued": "Hisoblangan soliq (mln so'm)", "tax_debt": "Soliq qarzi (mln so'm)",
     "late_payments_count": "Kechikkan to'lovlar soni", "avg_delay_days": "O'rtacha kechikish (kun)",
     "rule_score": "Scorecard bali", "pd": "Qarzdorlik xavfi, %", "final_score": "Yakuniy ball",
-    "risk_class": "Xavf sinfi",
+    "risk_class": "Xavf sinfi", "expected_revenue": "Kutilgan aylanma (mln so'm)",
+    "turnover_gap": "Aylanma farqi, %", "inv_closing_value": "Qoldiq tovar (mln so'm)",
 }
 
 
@@ -79,7 +90,9 @@ def view(d, cols):
             v[c] = v[c].round(1)
     if "pd" in v:
         v["pd"] = (v["pd"] * 100).round(1)
-    for c in ("revenue", "net_profit", "tax_accrued", "tax_debt", "avg_delay_days"):
+    if "turnover_gap" in v:
+        v["turnover_gap"] = (v["turnover_gap"] * 100).round(1)
+    for c in ("revenue", "net_profit", "tax_accrued", "tax_debt", "avg_delay_days", "expected_revenue", "inv_closing_value"):
         if c in v:
             v[c] = v[c].round(1)
     return v.rename(columns=COL_UZ)
@@ -87,7 +100,8 @@ def view(d, cols):
 
 st.sidebar.title("📊 Tax Scoring")
 st.sidebar.caption("Yuridik shaxslarning soliq qarzdorligi va moliyaviy ishonchliligini baholash axborot tizimi")
-page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "Yangi korxona (what-if)",
+page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "Tovar qoldig'i va aylanma manbasi",
+                                   "Yangi korxona (what-if)",
                                    "Korxonalar ro'yxati", "Erta ogohlantirish", "Ogohlantirish yuborish",
                                    "Modellar taqqoslash", "Raqamlar izohi", "Tizim haqida"])
 st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yaratilgan.")
@@ -155,6 +169,84 @@ elif page == "Korxonani tekshirish (STIR)":
             st.download_button("📄 Soliq pasportini yuklab olish (PDF)", passport_pdf(r),
                                file_name=f"soliq_pasporti_{r['stir']}.pdf", mime="application/pdf")
 
+# ---------------------------------- TOVAR QOLDIG'I ----------------------------------
+elif page == "Tovar qoldig'i va aylanma manbasi":
+    st.title("Tovar qoldig'i zaxirasi va aylanma manbasi")
+    st.caption("Tovar balansi: boshlang'ich qoldiq + kirim − oxirgi qoldiq = sotilgan tovar tannarxi. Tannarxga tarmoq ustamasi "
+               "qo'shilsa, kutilgan aylanma chiqadi va u deklaratsiya qilingan aylanma bilan solishtiriladi.")
+    inv_df = df[df["has_inventory"] == 1]
+    tab1, tab2 = st.tabs(["Korxona bo'yicha", "Umumiy tahlil"])
+    with tab1:
+        q = st.text_input("STIR yoki nom", key="inv_q", placeholder="masalan: " + inv_df["stir"].iloc[0])
+        st.caption("Aylanmasi eng shubhali korxonalar STIR'i: " + ", ".join(inv_df.nsmallest(3, "turnover_gap")["stir"]))
+        if q:
+            m = df[df["stir"].str.contains(q.strip()) | df["name"].str.contains(q.strip(), case=False, regex=False)]
+            if m.empty:
+                st.warning("Korxona topilmadi.")
+            else:
+                idx = m.index[0] if len(m) == 1 else st.selectbox(
+                    f"{len(m)} ta natija", m.index[:50], key="inv_sel",
+                    format_func=lambda i: f"{df.loc[i, 'stir']} — {df.loc[i, 'name']}")
+                r = df.loc[idx]
+                st.header(f"{r['name']}  ·  STIR {r['stir']}")
+                st.caption(f"{r['region']} · {r['sector']}")
+                if r["has_inventory"] != 1:
+                    st.info(f"«{r['sector']}» tarmog'ida tovar qoldig'i hisobi yuritilmaydi. Shu sababli aylanma manbasi "
+                            "ko'rsatkichlari hisoblanmaydi va ballga ta'sir qilmaydi, korxona bu uchun jazolanmaydi.")
+                else:
+                    markup, norm = SECTOR_INV[r["sector"]]
+                    a, b, c, d_ = st.columns(4)
+                    a.metric("Boshlang'ich qoldiq", f"{r['inv_opening_value']:,.1f}", help="mln so'm")
+                    b.metric("Kirim (xarid)", f"{r['inv_purchases']:,.1f}", help="mln so'm")
+                    c.metric("Oxirgi qoldiq", f"{r['inv_closing_value']:,.1f}", help="mln so'm, yil oxiriga")
+                    d_.metric("Sotilgan tovar tannarxi", f"{r['inv_cogs']:,.1f}", help="boshlang'ich + kirim − oxirgi qoldiq")
+                    a, b, c = st.columns(3)
+                    a.metric("Kutilgan aylanma", f"{r['expected_revenue']:,.1f}", help=f"tannarx × (1 + {markup:.0%} tarmoq ustamasi)")
+                    b.metric("Deklaratsiya qilingan aylanma", f"{r['revenue']:,.1f}")
+                    c.metric("Aylanma farqi", f"{r['turnover_gap']:+.1%}", help="(deklaratsiya − kutilgan) / kutilgan")
+                    level, text = turnover_verdict(r["turnover_gap"])
+                    {"ok": st.success, "warn": st.warning, "bad": st.error}[level](text)
+
+                    left, right = st.columns([3, 2])
+                    left.subheader("Aylanma manbasi")
+                    left.pyplot(plots.turnover_source(r))
+                    gt = goods[goods["stir"] == r["stir"]].copy()
+                    right.subheader("Qoldiq tovar guruhlari")
+                    if len(gt):
+                        gt["Ulushi, %"] = (gt["value"] / gt["value"].sum() * 100).round(1)
+                        gt = gt.drop(columns="stir").rename(columns={
+                            "group": "Tovar guruhi", "unit": "O'lchov", "quantity": "Miqdor",
+                            "unit_price": "Birlik narxi (so'm)", "value": "Summa (mln so'm)"})
+                        right.dataframe(gt, hide_index=True, use_container_width=True)
+                        right.caption(f"Jami qoldiq: {r['inv_closing_value']:,.2f} mln so'm · {len(gt)} ta tovar guruhi")
+                    st.subheader("Ballga ta'siri")
+                    a, b, c = st.columns(3)
+                    a.metric("Aylanma manbasi: qismiy ball", f"{r['sub_source']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_source'])}%")
+                    b.metric("Qoldiq aylanuvchanligi: qismiy ball", f"{r['sub_stock']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_stock'])}%")
+                    c.metric("Yakuniy ball", f"{r['final_score']:.1f} / 100")
+                    st.caption(f"Tarmoq o'rtacha ustamasi {markup:.0%}. Qoldiq tovar o'rtacha {r['stock_days']:.0f} kunda sotiladi "
+                               f"(tarmoq me'yori ≈ {norm} kun).")
+    with tab2:
+        secs = st.multiselect("Tarmoq", sorted(inv_df["sector"].unique()))
+        sub = inv_df[inv_df["sector"].isin(secs)] if secs else inv_df
+        susp = sub[sub["turnover_gap"] < -0.25]
+        a, b, c = st.columns(3)
+        a.metric("Tovar hisobi yuritadigan korxonalar", f"{len(sub):,}")
+        b.metric("Aylanmasi shubhali (farq < −25%)", f"{len(susp):,} ({len(susp) / max(len(sub), 1):.1%})")
+        c.metric("Taxminiy yashirilgan aylanma (mlrd so'm)", f"{(susp['expected_revenue'] - susp['revenue']).sum() / 1000:,.1f}")
+        a, b = st.columns(2)
+        a.subheader("Kutilgan va deklaratsiya qilingan aylanma"); a.pyplot(plots.inventory_scatter(sub))
+        b.subheader("Aylanma farqi taqsimoti"); b.pyplot(plots.gap_hist(sub))
+        st.subheader("Aylanma manbasi eng shubhali 15 ta korxona")
+        scols = ["stir", "name", "sector", "revenue", "expected_revenue", "turnover_gap", "final_score", "risk_class"]
+        top = view(sub.nsmallest(15, "turnover_gap"), scols)
+        st.dataframe(top, hide_index=True, use_container_width=True)
+        st.download_button("⬇️ Shubhali korxonalar ro'yxati (Excel)", to_excel(view(susp.sort_values("turnover_gap"), scols)),
+                           file_name="shubhali_aylanma.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.caption("Eslatma: bu sintetik ma'lumotdagi model hisobi. Real tizimda shubhali natija avtomatik jazo emas, "
+                   "inspektor tekshiruvi uchun signal hisoblanadi.")
+
 # ---------------------------------- WHAT-IF ----------------------------------
 elif page == "Yangi korxona (what-if)":
     st.title("Yangi korxona ma'lumotlarini kiritish")
@@ -177,13 +269,20 @@ elif page == "Yangi korxona (what-if)":
         lrep = c.slider("Kech topshirilgan hisobotlar (12 oy)", 0, 12, 0)
         aud = a.slider("Tekshiruvdagi qoidabuzarliklar", 0, 10, 0)
         vat = b.checkbox("QQS to'lovchisi", value=revenue > 1000)
+        has_inv = c.checkbox("Tovar qoldig'i hisobi yuritiladi", value=False)
+        inv_open = a.number_input("Boshlang'ich tovar qoldig'i", 0.0, 1e6, 100.0)
+        inv_purch = b.number_input("Yillik tovar kirimi (xarid)", 0.0, 1e6, 1100.0)
+        inv_close = c.number_input("Oxirgi tovar qoldig'i", 0.0, 1e6, 120.0)
         go = st.form_submit_button("Hisoblash", type="primary")
     if go:
         raw = pd.DataFrame([{"stir": "—", "name": "Yangi korxona", "region": "—", "sector": sector, "legal_form": legal,
                              "years_active": years, "employees": emp, "revenue": revenue, "net_profit": profit,
                              "total_assets": assets, "equity": equity, "current_assets": ca, "current_liabilities": cl,
                              "tax_accrued": tax, "tax_debt": debt, "late_payments_count": late, "avg_delay_days": delay,
-                             "late_reports_count": lrep, "audit_violations": aud, "vat_payer": int(vat)}])
+                             "late_reports_count": lrep, "audit_violations": aud, "vat_payer": int(vat),
+                             "has_inventory": int(has_inv), "inv_opening_value": inv_open if has_inv else 0.0,
+                             "inv_purchases": inv_purch if has_inv else 0.0,
+                             "inv_closing_value": inv_close if has_inv else 0.0}])
         res = score_dataset(raw, predict_pd(bundle, raw))
         show_company(res.iloc[0], raw)
 
@@ -328,9 +427,11 @@ Ballga qarab korxona uch guruhdan biriga kiradi:
 | 🔴 Yuqori xavf | Qarzdorlik va kechikishlar ko'p, moliyaviy holati zaif | taxminan 36% |
 
 ### 3. Scorecard bali
-**Ekspert qoidalari** bo'yicha hisoblangan ball. Olti ko'rsatkich vaznlar bilan baholanadi:
-soliq qarzi/aylanma (25%), to'lov intizomi (20%), joriy likvidlik (15%), avtonomlik (15%), rentabellik (15%),
-hisobotlarni o'z vaqtida topshirish (10%). Tekshiruvda qoidabuzarlik topilsa, ball kamayadi.
+**Ekspert qoidalari** bo'yicha hisoblangan ball. Tovar hisobi yuritiladigan korxonalarda sakkizta ko'rsatkich baholanadi:
+soliq qarzi/aylanma (20%), to'lov intizomi (16%), joriy likvidlik (12%), avtonomlik (12%), rentabellik (12%),
+hisobotlar (8%), **aylanma manbasi (14%)**, **qoldiq aylanuvchanligi (6%)**. Tovar hisobi yuritilmaydigan tarmoqlarda
+(IT, xizmat, ta'lim, turizm, transport) oxirgi ikkitasi hisoblanmaydi va asosiy oltitasi 25/20/15/15/15/10 vaznda baholanadi,
+shuning uchun korxona nohaq jazolanmaydi. Tekshiruvda qoidabuzarlik topilsa, ball kamayadi.
 Qoidalarni inson tushunadi va tekshira oladi, shuning uchun bu model **shaffof**.
 
 ### 4. Qarzdorlik xavfi, % (PD, Probability of Default)
@@ -368,6 +469,13 @@ Xulosa: **yuqori xavf**. Bunday korxona soliq organi e'tiborida bo'lishi kerak.
 - **F1**: Precision va Recall o'rtasidagi muvozanat.
 - **Brier xatosi**: ehtimollik bahosining aniqligi, 0 ga yaqin bo'lgani yaxshi.
 
+### 10. Tovar qoldig'i va aylanma manbasi
+- **Tovar balansi**: boshlang'ich qoldiq + kirim (xarid) − oxirgi qoldiq = sotilgan tovar tannarxi.
+- **Kutilgan aylanma** = tannarx × (1 + tarmoq o'rtacha ustamasi).
+- **Aylanma farqi** = (deklaratsiya − kutilgan) / kutilgan. Manfiy va katta bo'lsa (−25% dan past) aylanma yashirilgan bo'lishi mumkin, bu **shubhali** holat. Juda yuqori bo'lsa, tovar kirimi hujjatlashtirilmagan bo'lishi mumkin.
+- **Qoldiq aylanishi (kun)** = o'rtacha qoldiq / tannarx × 365. Tarmoq me'yoridan ancha ko'p bo'lsa, tovar sotilmay yotibdi.
+- Bu ko'rsatkichlar faqat tovar hisobi yuritiladigan tarmoqlarda hisoblanadi: savdo, ishlab chiqarish, qurilish, qishloq xo'jaligi, umumiy ovqatlanish.
+
 > ⚠️ Barcha korxonalar sintetik (sun'iy) ma'lumot. Raqamlar tizimning ishlash tamoyilini ko'rsatadi, haqiqiy korxonalarga tegishli emas.
 """)
 
@@ -378,8 +486,9 @@ else:
 **Maqsad:** yuridik shaxslarning soliq intizomi va moliyaviy holatiga ko'ra ball (0–100) va xavf sinfini aniqlash.
 
 **Gibrid yondashuv**
-1. *Scorecard (ekspert model)*: 6 ta ko'rsatkich vaznlar bilan (qarz 25%, to'lov intizomi 20%, likvidlik 15%,
-   avtonomlik 15%, rentabellik 15%, hisobotlar 10%) + tekshiruv qoidabuzarliklari uchun jarima.
+1. *Scorecard (ekspert model)*: 6 ta asosiy ko'rsatkich (qarz, to'lov intizomi, likvidlik, avtonomlik, rentabellik,
+   hisobotlar) + tovar hisobi yuritiladigan tarmoqlar uchun 2 ta qo'shimcha ko'rsatkich (aylanma manbasi 14%,
+   qoldiq aylanuvchanligi 6%) + tekshiruv qoidabuzarliklari uchun jarima.
 2. *ML modeli*: Logistic Regression, Random Forest, Gradient Boosting. Maqsad: keyingi yilda xavfli qarzdorlik (PD).
 3. *Gibrid ball* = 0.5 × scorecard + 0.5 × ML ball.
 

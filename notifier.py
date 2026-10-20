@@ -41,7 +41,8 @@ def channel_ready(channel: str, cfg: dict) -> bool:
 
 def weak_reasons(r: pd.Series, top=2):
     """Eng ko'p ball yo'qotilgan ko'rsatkichlar (sabablar)."""
-    lost = sorted(WEIGHTS, key=lambda k: WEIGHTS[k] * (100 - r[f"sub_{k}"]), reverse=True)
+    keys = [k for k in WEIGHTS if r[f"w_{k}"] > 0]
+    lost = sorted(keys, key=lambda k: r[f"w_{k}"] * (100 - r[f"sub_{k}"]), reverse=True)
     return [k for k in lost[:top] if r[f"sub_{k}"] < 70]
 
 

@@ -7,6 +7,8 @@ beriladi; moliyaviy ko'rsatkichlar va soliq intizomi shu omil bilan bog'liq, lek
 import numpy as np
 import pandas as pd
 
+from features import SECTOR_INV
+
 # tarmoq: (mediana aylanma mln so'm, sigma, o'rtacha rentabellik, bazaviy xavf)
 SECTORS = {
     "Savdo": (900, 1.1, 0.04, 0.15),
@@ -42,11 +44,71 @@ SECTOR_WORD = {
 }
 
 
+# tarmoq -> [(tovar guruhi, o'lchov birligi, o'rtacha birlik narxi, so'm)]
+GOODS = {
+    "Savdo": [("Oziq-ovqat mahsulotlari", "kg", 15_000), ("Maishiy texnika", "dona", 3_500_000),
+              ("Kiyim-kechak", "dona", 150_000), ("Elektronika", "dona", 2_500_000),
+              ("Xo'jalik buyumlari", "dona", 40_000), ("Ichimliklar", "litr", 8_000),
+              ("Kimyoviy vositalar", "dona", 25_000)],
+    "Ishlab chiqarish": [("Xom ashyo", "kg", 12_000), ("Yarim tayyor mahsulot", "dona", 80_000),
+                         ("Tayyor mahsulot", "dona", 250_000), ("Qadoqlash materiallari", "dona", 3_000),
+                         ("Butlovchi qismlar", "dona", 150_000), ("Yoqilg'i va moylash materiallari", "litr", 10_000)],
+    "Qurilish": [("Sement", "tonna", 900_000), ("Armatura", "tonna", 9_000_000), ("G'isht", "dona", 1_200),
+                 ("Bo'yoq va qorishmalar", "kg", 18_000), ("Yog'och materiallar", "m3", 3_500_000),
+                 ("Elektr jihozlari", "dona", 90_000)],
+    "Qishloq xo'jaligi": [("G'alla", "tonna", 3_500_000), ("Paxta xomashyosi", "tonna", 7_000_000),
+                          ("Sabzavot va mevalar", "kg", 5_000), ("Mineral o'g'itlar", "tonna", 3_200_000),
+                          ("Em-xashak", "tonna", 2_500_000), ("Urug'lik", "kg", 20_000)],
+    "Umumiy ovqatlanish": [("Go'sht mahsulotlari", "kg", 90_000), ("Un va yorma", "kg", 9_000),
+                           ("Sabzavotlar", "kg", 6_000), ("Ichimliklar", "litr", 7_000),
+                           ("Yog' va ziravorlar", "kg", 28_000), ("Sut mahsulotlari", "kg", 14_000)],
+}
+INT_UNITS = {"dona", "kg", "litr"}
+
+
 def _sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 
-def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.DataFrame:
+def _inventory(rng, sec, revenue, z):
+    """Tovar balansi. Ba'zi korxonalar aylanmaning bir qismini yashiradi (hide): haqiqiy sotuv deklaratsiyadan katta,
+    tovar kirim-qoldiq hisobi esa HAQIQIY sotuvni aks ettiradi. Shuning uchun deklaratsiya kutilgan aylanmadan past chiqadi."""
+    n = len(sec)
+    has = np.array([s in SECTOR_INV for s in sec])
+    mk_s = np.array([SECTOR_INV.get(s, (0.3, 45))[0] for s in sec])
+    days_s = np.array([SECTOR_INV.get(s, (0.3, 45))[1] for s in sec], float)
+    hide = np.where(rng.random(n) < _sigmoid(-2.3 + 0.9 * z), rng.uniform(0.12, 0.55, n), 0.0)
+    actual = revenue / (1 - hide)
+    markup = mk_s * np.exp(0.2 * rng.normal(size=n))
+    cogs = actual / (1 + markup)
+    days_open = days_s * np.exp(0.3 * rng.normal(size=n))
+    days_close = days_s * np.exp(0.3 * rng.normal(size=n) + 0.25 * z)  # xavfli korxonalarda ortiqcha qoldiq
+    closing_t = cogs * days_close / 365
+
+    closing = np.zeros(n)
+    rows = []
+    for i in np.where(has)[0]:
+        cat = GOODS[sec[i]]
+        k = min(len(cat), int(rng.integers(3, 7)))
+        pick = rng.choice(len(cat), k, replace=False)
+        w = rng.dirichlet(np.ones(k) * 2)
+        for j, wj in zip(pick, w):
+            name, unit, price = cat[j]
+            price = price * float(np.exp(0.15 * rng.normal()))
+            qty = closing_t[i] * wj * 1e6 / price
+            qty = max(int(round(qty)), 1) if unit in INT_UNITS else max(round(qty, 1), 0.1)
+            price = int(round(price / 100) * 100)
+            value = round(qty * price / 1e6, 2)
+            rows.append((i, name, unit, qty, price, value))
+            closing[i] += value
+    goods = pd.DataFrame(rows, columns=["i", "group", "unit", "quantity", "unit_price", "value"])
+    opening = np.where(has, cogs * days_open / 365, 0.0)
+    purchases = np.where(has, np.maximum(cogs + closing - opening, 0.0), 0.0)
+    return has, opening.round(2), purchases.round(2), closing.round(2), goods, mk_s, days_s
+
+
+def generate_all(n: int = 3000, seed: int = 42, target_rate: float = 0.14):
+    """(korxonalar jadvali, tovar guruhlari jadvali) qaytaradi."""
     rng = np.random.default_rng(seed)
     names = list(SECTORS)
     sec = rng.choice(names, n, p=SECTOR_P / SECTOR_P.sum())
@@ -84,9 +146,16 @@ def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.Dat
     vat = (revenue > 1000) | (rng.random(n) < 0.15)
 
     # Keyingi yilda xavfli qarzdorlik (90+ kun muddati o'tgan qarz) belgisi
+    rng3 = np.random.default_rng(seed + 2000)  # tovar qoldig'i uchun alohida oqim
+    has_inv, inv_open, inv_purch, inv_close, goods, mk_s, days_s = _inventory(rng3, sec, revenue, z)
+    cogs_book = np.maximum(inv_open + inv_purch - inv_close, 0.01)
+    gap = np.where(has_inv, revenue / (cogs_book * (1 + mk_s)) - 1, 0.0)
+    st_ratio = np.where(has_inv, (inv_open + inv_close) / 2 / cogs_book * 365 / days_s, 1.0)
+
     dtt = np.minimum(tax_debt / tax_accrued, 2.0)
     logit = (0.7 * z + 1.5 * dtt + 0.10 * late_pay + 0.015 * avg_delay + 0.25 * audits
-             - 0.6 * (eq_ratio - 0.4) - 0.5 * (cur_ratio - 1.4) + rng.normal(0, 0.7, n))
+             - 0.6 * (eq_ratio - 0.4) - 0.5 * (cur_ratio - 1.4) + rng.normal(0, 0.7, n)
+             + 3.0 * np.clip(-gap, 0, 0.6) + 0.3 * np.clip(st_ratio - 1.5, 0, 2))
     lo, hi = -15.0, 5.0
     for _ in range(50):  # kesishmani (intercept) maqsadli ulushga moslash
         mid = (lo + hi) / 2
@@ -108,7 +177,7 @@ def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.Dat
     phone = [f"+998{o}{rng2.integers(1_000_000, 9_999_999)}" for o in rng2.choice(ops, n)]
     email = [f"info{str(s_)[-5:]}@example.com" for s_ in stir]
 
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "stir": stir.astype(str), "name": name, "phone": phone, "email": email, "region": region, "sector": sec,
         "legal_form": legal, "years_active": years, "employees": employees,
         "revenue": revenue.round(1), "net_profit": net_profit.round(1),
@@ -117,11 +186,21 @@ def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.Dat
         "tax_accrued": tax_accrued.round(1), "tax_debt": tax_debt.round(2),
         "late_payments_count": late_pay, "avg_delay_days": avg_delay.round(1),
         "late_reports_count": late_rep, "audit_violations": audits,
-        "vat_payer": vat.astype(int), "default_next_year": y,
+        "vat_payer": vat.astype(int), "has_inventory": has_inv.astype(int),
+        "inv_opening_value": inv_open, "inv_purchases": inv_purch, "inv_closing_value": inv_close,
+        "default_next_year": y,
     })
+    goods["stir"] = df["stir"].values[goods["i"].values]
+    goods = goods[["stir", "group", "unit", "quantity", "unit_price", "value"]]
+    return df, goods
+
+
+def generate(n: int = 3000, seed: int = 42, target_rate: float = 0.14) -> pd.DataFrame:
+    return generate_all(n, seed, target_rate)[0]
 
 
 if __name__ == "__main__":
-    df = generate()
+    df, goods = generate_all()
     df.to_csv("data/companies.csv", index=False)
+    goods.to_csv("data/goods.csv", index=False)
     print(df.shape, "xavfli ulush:", df.default_next_year.mean().round(3))

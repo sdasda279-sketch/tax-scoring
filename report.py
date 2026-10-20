@@ -45,6 +45,9 @@ def passport_pdf(r: pd.Series) -> bytes:
             ["Hisoblangan soliq", f"{r['tax_accrued']:,.1f}", "Soliq qarzi", f"{r['tax_debt']:,.2f}"],
             ["Kechikkan to'lovlar", int(r["late_payments_count"]), "O'rtacha kechikish (kun)", f"{r['avg_delay_days']:.1f}"],
             ["Kech hisobotlar", int(r["late_reports_count"]), "Tekshiruv qoidabuzarliklari", int(r["audit_violations"])]]
+    if r["has_inventory"] == 1:
+        info.append(["Qoldiq tovar (mln so'm)", f"{r['inv_closing_value']:,.1f}", "Kutilgan aylanma (mln so'm)", f"{r['expected_revenue']:,.1f}"])
+        info.append(["Aylanma farqi", f"{r['turnover_gap']:+.1%}", "Qoldiq aylanishi (kun)", f"{r['stock_days']:.0f}"])
     S.append(_tbl(info, [38 * mm, 45 * mm, 50 * mm, 40 * mm], header=False))
     S.append(Spacer(1, 10))
     S.append(Paragraph("Ko'rsatkichlar bo'yicha ballar", ss["Heading4"]))
