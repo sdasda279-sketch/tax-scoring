@@ -10,6 +10,7 @@ import plots
 from features import FEATURE_LABELS, SECTOR_INV
 from data_generator import REGIONS, SECTORS, LEGAL
 from ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
+import advisor
 from notifier import build_email, build_sms, channel_ready, dispatch, load_config, sms_segments
 from report import passport_pdf, to_excel
 from scoring import classify, contributions, recommendations, rule_score, to_scale, turnover_verdict
@@ -105,6 +106,14 @@ page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "
                                    "Korxonalar ro'yxati", "Erta ogohlantirish", "Ogohlantirish yuborish",
                                    "Modellar taqqoslash", "Raqamlar izohi", "Tizim haqida"])
 st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yaratilgan.")
+with st.sidebar.expander("🤖 AI sozlamalari"):
+    st.checkbox("AI yoqilgan", value=True, key="ai_on")
+    st.text_input("Claude API kaliti (ixtiyoriy)", type="password", key="ai_key_input",
+                  help="Faqat shu sessiyada saqlanadi. Ommaviy saytda kalitni kodga emas, Secrets orqali bering.")
+    if advisor.load_ai_config(st.secrets, st.session_state.get("ai_key_input", "")).get("key"):
+        st.success("Kalit topildi: Claude AI ishlaydi.")
+    else:
+        st.info("Kalit yo'q: qolipli maslahatchi ishlaydi.")
 
 
 def show_company(r: pd.Series, raw_row: pd.DataFrame):
@@ -130,6 +139,87 @@ def show_company(r: pd.Series, raw_row: pd.DataFrame):
             st.success("Jiddiy muammolar aniqlanmadi.")
         for k, t in recs:
             st.write(f"**{k}:** {t}")
+
+
+AI_SESSION_LIMIT = 25  # bitta foydalanuvchi sessiyasida eng ko'pi bilan nechta AI so'rovi
+ai_cfg = advisor.load_ai_config(st.secrets, st.session_state.get("ai_key_input", ""))
+
+
+def show_ai_result(res):
+    st.markdown(res["text"])
+    for w in res["warnings"]:
+        st.warning("⚠️ " + w)
+    st.caption(f"Rejim: {res['mode']} · {advisor.DISCLAIMER}")
+
+
+def advisor_section(r, raw_row):
+    """Korxona kartochkasi ostidagi AI maslahatchi: reja, savol-javob, inspektor yordamchisi."""
+    stir = r["stir"]
+    st.divider()
+    st.subheader("🤖 AI maslahatchi")
+    use_ai = advisor.ai_enabled(ai_cfg, st.session_state.get("ai_on", True))
+    ai_ok = use_ai and st.session_state.get("ai_calls", 0) < AI_SESSION_LIMIT
+    if use_ai and not ai_ok:
+        st.info("Bu sessiyada AI so'rovlari limiti tugadi, qolipli maslahatchi ishlaydi.")
+    st.caption("🟢 Claude AI ulangan: hisob-kitoblar Python'da bajariladi, AI faqat tayyor natijalarni tushuntiradi."
+               if ai_ok else "⚪ Qolipli maslahatchi: matnlar tayyor qoliplar asosida shakllanadi, hisob-kitoblar bir xil.")
+    cache = st.session_state.setdefault("facts_cache", {})
+    if stir not in cache:
+        with st.spinner("Korxona ma'lumotlari tahlil qilinmoqda..."):
+            cache[stir] = advisor.build_facts(r, raw_row, bundle)
+    facts = cache[stir]
+
+    def run(kind, question=None, history=()):
+        with st.spinner("Javob tayyorlanmoqda..."):
+            res = advisor.respond(kind, facts, ai_cfg if ai_ok else {}, question, history)
+        if res["mode"].startswith("Claude"):
+            st.session_state["ai_calls"] = st.session_state.get("ai_calls", 0) + 1
+        return res
+
+    t1, t2, t3 = st.tabs(["📋 Maslahat va 30/60/90 reja", "💬 Savol-javob", "🔎 Inspektor yordamchisi"])
+    with t1:
+        sim = pd.DataFrame(facts["simulyatsiya"])
+        if len(sim):
+            st.markdown("**Quyidagilar bajarilsa, ball qanday o'zgaradi?** (hisob-kitob: scorecard + ML modeli)")
+            st.dataframe(sim[["ssenariy", "yangi_ball", "ball_ozgarishi", "yangi_sinf"]].rename(columns={
+                "ssenariy": "Ssenariy", "yangi_ball": "Taxminiy yangi ball", "ball_ozgarishi": "Ball o'zgarishi",
+                "yangi_sinf": "Yangi xavf sinfi"}), hide_index=True, use_container_width=True)
+            st.caption(facts["simulyatsiya_izohi"])
+        else:
+            st.success("Ballni oshiradigan aniq qadam topilmadi: ko'rsatkichlar yaxshi.")
+        if st.button("📋 Maslahat va 30/60/90 kunlik reja tayyorlash", key=f"plan_btn_{stir}"):
+            st.session_state[f"plan_{stir}"] = run("plan")
+        if f"plan_{stir}" in st.session_state:
+            show_ai_result(st.session_state[f"plan_{stir}"])
+    with t2:
+        hist = st.session_state.setdefault(f"chat_{stir}", [])
+        st.caption("Masalan: «Nega ballim past?», «Qarzni qanday kamaytiraman?», «Aylanma haqida ayt», «Nima qilsam yaxshilanadi?»")
+        area = st.container()
+        with st.form(f"chat_form_{stir}", clear_on_submit=True):
+            qtxt = st.text_input("Savolingiz")
+            sent = st.form_submit_button("Yuborish")
+        if sent and qtxt.strip():
+            res = run("chat", qtxt.strip(), list(hist))
+            hist.append({"role": "user", "content": qtxt.strip()})
+            hist.append({"role": "assistant", "content": res["text"], "mode": res["mode"], "warnings": res["warnings"]})
+        if st.button("Suhbatni tozalash", key=f"chat_clear_{stir}"):
+            hist.clear()
+        with area:
+            for m in hist:
+                with st.chat_message(m["role"]):
+                    st.markdown(m["content"])
+                    for w in m.get("warnings", []):
+                        st.warning("⚠️ " + w)
+                    if m["role"] == "assistant":
+                        st.caption(f"Rejim: {m['mode']}")
+    with t3:
+        st.caption("Ichki xulosa inspektor uchun: bu shubha signali va tekshiruv savollari, ayblov emas.")
+        if st.button("🔎 Inspektor xulosasini tayyorlash", key=f"insp_btn_{stir}"):
+            st.session_state[f"insp_{stir}"] = run("inspector")
+        if f"insp_{stir}" in st.session_state:
+            show_ai_result(st.session_state[f"insp_{stir}"])
+    with st.expander("Maslahatchi tayanadigan tekshirilgan ma'lumotlar"):
+        st.json(facts)
 
 
 # ---------------------------------- DASHBOARD ----------------------------------
@@ -168,6 +258,7 @@ elif page == "Korxonani tekshirish (STIR)":
             show_company(r, df.loc[[idx], RAW_COLS])
             st.download_button("📄 Soliq pasportini yuklab olish (PDF)", passport_pdf(r),
                                file_name=f"soliq_pasporti_{r['stir']}.pdf", mime="application/pdf")
+            advisor_section(r, df.loc[[idx], RAW_COLS])
 
 # ---------------------------------- TOVAR QOLDIG'I ----------------------------------
 elif page == "Tovar qoldig'i va aylanma manbasi":
