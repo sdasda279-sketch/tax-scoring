@@ -49,11 +49,13 @@ footer, [data-testid="stAppDeployButton"], #MainMenu { visibility:hidden !import
 
 BASE_CSS = HIDE_HELPERS_CSS + """
 html, body, .stApp { font-family: "Segoe UI", Inter, system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif; }
-.stApp { background: linear-gradient(160deg, #F6F9FE 0%, #E7EEF9 100%) !important; position:relative; isolation:isolate; }
+html { min-height:100vh; background: linear-gradient(160deg, #F6F9FE 0%, #E7EEF9 100%) fixed !important; }
+body { background: transparent !important; min-height:100vh; }
+.stApp { background: transparent !important; }
 [data-testid="stAppViewContainer"], [data-testid="stMain"], section.main, [data-testid="stBottom"], [data-testid="stHeader"] { background: transparent !important; }
 
 /* Orqa fondagi katta logotip */
-.stApp::before { content:""; position:fixed; z-index:-1; pointer-events:none; top:50%; left:calc(50% + 10.5rem);
+body::before { content:""; position:fixed; z-index:-1; pointer-events:none; top:50%; left:calc(50% + 10.5rem);
   width:74vmin; height:74vmin; transform:translate(-50%,-50%); background:url("@LOGO@") center/contain no-repeat;
   opacity:.075; animation: ts-breathe 16s ease-in-out infinite; }
 @keyframes ts-breathe { 0%,100% { transform:translate(-50%,-50%) scale(1) rotate(0deg);} 50% { transform:translate(-50%,-50%) scale(1.045) rotate(2.5deg);} }
@@ -138,12 +140,13 @@ button[kind="primary"], button[data-testid="stBaseButton-primary"], button[data-
 [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p { color:#fff; }
 
 /* Mobil: katta logotip markazda */
-@media (max-width: 900px) { .stApp::before { left:50%; width:90vmin; height:90vmin; } }
+@media (max-width: 900px) { body::before { left:50%; width:90vmin; height:90vmin; } }
 """
 
 LOGIN_CSS = HIDE_HELPERS_CSS + """
-html, body { min-height:100vh; background: radial-gradient(circle at 18% 8%, #153A7A 0%, @navy@ 52%, #050F26 100%) fixed !important; }
-.stApp { background:transparent !important; position:relative; z-index:1; }
+html { min-height:100vh; background: radial-gradient(circle at 18% 8%, #153A7A 0%, @navy@ 52%, #050F26 100%) fixed !important; }
+body { background: transparent !important; min-height:100vh; }
+.stApp { background:transparent !important; }
 [data-testid="stAppViewContainer"], [data-testid="stMain"], section.main, [data-testid="stHeader"], [data-testid="stBottom"] { background:transparent !important; }
 [data-testid="stSidebar"], [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stToolbar"] { display:none !important; }
 .block-container { max-width:500px !important; margin:4vh auto 0 !important; padding:1.6rem 2rem 1.3rem !important;
@@ -166,9 +169,9 @@ button[kind="primary"], button[kind="primaryFormSubmit"], button[data-testid="st
 [data-testid="stFormSubmitButton"] > button { background:rgba(255,255,255,.09); color:#fff; }
 [data-testid="stFormSubmitButton"] > button:hover { border-color:@gold@; box-shadow:0 8px 22px rgba(233,180,76,.3); }
 /* JS ishlamasa: CSS bilan zaxira fon (katta logotip + siljuvchi chiziqlar) */
-body:not(.ts-js) .stApp::before { content:""; position:fixed; z-index:-1; pointer-events:none; inset:0;
+body:not(.ts-js)::before { content:""; position:fixed; z-index:-1; pointer-events:none; inset:0;
   background:url("@LOGO@") center/min(80vmin,780px) no-repeat; opacity:.10; }
-body:not(.ts-js) .stApp::after { content:""; position:fixed; z-index:-1; pointer-events:none; inset:-50%;
+body:not(.ts-js)::after { content:""; position:fixed; z-index:-1; pointer-events:none; inset:-50%;
   background: repeating-linear-gradient(60deg, rgba(120,180,255,.10) 0 1px, transparent 1px 90px), repeating-linear-gradient(-60deg, rgba(233,180,76,.08) 0 1px, transparent 1px 90px);
   animation: ts-drift 40s linear infinite; }
 @keyframes ts-drift { to { transform: translate(90px, 52px); } }
@@ -187,7 +190,7 @@ BG_JS = r"""
   if (D.getElementById('ts-bg')) return;
   D.body.classList.add('ts-js');
   var wrap = D.createElement('div'); wrap.id = 'ts-bg';
-  wrap.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:0;pointer-events:none;overflow:hidden';
+  wrap.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:-1;pointer-events:none;overflow:hidden';
   var logo = D.createElement('img'); logo.src = __LOGO__;
   logo.style.cssText = 'position:absolute;left:50%;top:50%;width:min(108vmin,1040px);height:min(108vmin,1040px);transform:translate(-50%,-50%);opacity:.2;' +
                        'animation:tsbgspin 90s linear infinite';
@@ -309,20 +312,38 @@ def hero_html() -> str:
             f'<div class="ts-hero-sub">{_html.escape(brand.APP_TAGLINE)}<br/>o\'quv prototipi</div></div>')
 
 
+def safe_mode() -> bool:
+    """Saytni ?safe=1 bilan ochsangiz, maxsus dizayn va animatsiyalar o'chiriladi (muammoni aniqlash uchun)."""
+    try:
+        import streamlit as st
+        return str(st.query_params.get("safe", "")) == "1"
+    except Exception:
+        return False
+
+
 def login_screen():
     """Kirish oynasi: tungi fon, harakatlanuvchi tarmoq chiziqlari, katta logotip."""
     import streamlit as st
-    st.markdown(f"<style>{_fill(LOGIN_CSS)}</style>" + hero_html(), unsafe_allow_html=True)
+    if safe_mode():
+        st.title("Soliq Skoring")
+        st.caption("Xavfsiz rejim: dizayn va animatsiyalar o'chirilgan.")
+        return
+    st.markdown(f"<style>{_fill(LOGIN_CSS)}</style>", unsafe_allow_html=True)  # alohida: bu konteyner yashiriladi
+    st.markdown(hero_html(), unsafe_allow_html=True)
     inject_js(bg_script())
 
 
 def apply_base():
     import streamlit as st
+    if safe_mode():
+        return
     st.markdown(f"<style>{_fill(BASE_CSS)}</style>", unsafe_allow_html=True)
 
 
 def splash(name: str):
     """Kirgandan keyin: katta logotip, ism bilan salomlashish, so'ng dasturga o'tish."""
+    if safe_mode():
+        return
     inject_js(splash_script(f"Xush kelibsiz, {name}"))
 
 
