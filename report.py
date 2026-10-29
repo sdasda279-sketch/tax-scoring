@@ -7,9 +7,10 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+import brand
 from scoring import contributions, recommendations
 
-RISK_COL = {"Past xavf": "#2e9e5b", "O'rtacha xavf": "#e0a526", "Yuqori xavf": "#d64545"}
+RISK_COL = {"Past xavf": brand.PALETTE["green"], "O'rtacha xavf": "#C98A12", "Yuqori xavf": brand.PALETTE["red"]}
 
 
 def _tbl(data, widths=None, header=True):
@@ -17,7 +18,7 @@ def _tbl(data, widths=None, header=True):
     st = [("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("FONTSIZE", (0, 0), (-1, -1), 9),
           ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]
     if header:
-        st += [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef6")),
+        st += [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE7F8")),
                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold")]
     t.setStyle(TableStyle(st)); return t
 
@@ -27,7 +28,18 @@ def passport_pdf(r: pd.Series) -> bytes:
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm,
                             topMargin=15 * mm, bottomMargin=15 * mm)
     ss = getSampleStyleSheet(); S = []
-    S.append(Paragraph("SOLIQ PASPORTI (Tax Scoring)", ss["Title"]))
+    navy = colors.HexColor(brand.PALETTE["navy"])
+    head = Paragraph(f'<font color="{brand.PALETTE["navy"]}" size="18"><b>SOLIQ PASPORTI</b></font><br/>'
+                     f'<font color="{brand.PALETTE["muted"]}" size="9">{brand.APP_NAME} · {brand.APP_TAGLINE}</font>', ss["Normal"])
+    logo = brand.logo_png_path()
+    if logo:
+        from reportlab.platypus import Image
+        ht = Table([[Image(logo, 20 * mm, 20 * mm), head]], colWidths=[24 * mm, 150 * mm])
+    else:
+        ht = Table([[head]], colWidths=[174 * mm])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LINEBELOW", (0, 0), (-1, 0), 1.6, colors.HexColor(brand.PALETTE["gold"])),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+    S.append(ht)
     S.append(Paragraph(f"{r['name']} | STIR: {r['stir']}", ss["Heading3"]))
     S.append(Spacer(1, 4))
     col = RISK_COL[r["risk_class"]]

@@ -41,3 +41,38 @@ SMS, email va Telegram bot internet talab qiladi; qolgan barcha bo'limlar intern
   yoki yon paneldagi "AI sozlamalari" (faqat shu sessiya uchun). Model: `ANTHROPIC_MODEL` (sukut bo'yicha claude-sonnet-5-5).
 - Himoya: sessiyada 25 ta, kuniga server bo'yicha 150 ta (`AI_DAILY_LIMIT`) AI so'rovi. Ommaviy saytda kalitni FAQAT Secrets orqali bering
   va Anthropic konsolida xarajat limitini o'rnating.
+
+## Kirish, rollar va xavfsizlik
+Tizimga login va parol bilan kiriladi; rol avtomatik aniqlanadi:
+- **admin**: hamma bo'limlar + "Foydalanuvchilar" (inspektor/korxona hisoblari, parol, bloklash, jurnal).
+- **inspector**: barcha tahlil bo'limlari (dashboard, ro'yxatlar, shubhali aylanma, inspektor yordamchisi, ogohlantirish).
+- **company** (yuridik shaxs): faqat "Mening korxonam" va "Raqamlar izohi": faqat O'Z korxonasi (login = STIR).
+
+**Birinchi admin.** Ikki yo'l:
+1. Muhit o'zgaruvchisi / Streamlit Secrets: `ADMIN_USERNAME` (ixtiyoriy, sukut bo'yicha admin) va `ADMIN_PASSWORD` (kamida 8 belgi, harf va raqam).
+   Ommaviy saytda FAQAT shu yo'lni ishlating.
+2. Parol berilmasa, birinchi ochilishda sozlash oynasi chiqadi; kod server konsolida (terminal/`run.bat` oynasida yoki
+   Streamlit Cloud: Manage app -> logs) `[AUTH] Birinchi sozlash kodi` satrida ko'rinadi.
+
+**Yuridik shaxs ro'yxatdan o'tishi.** "Kirish" oynasidagi ikkinchi varaq: STIR kiritiladi, korxonaning telefon raqamiga bir martalik
+kod yuboriladi (5 daqiqa, 5 urinish), kod to'g'ri bo'lsa parol belgilanadi. SMS provayder (Eskiz) ulanmagan bo'lsa, kod ekranda
+ko'rsatiladi (SIMULYATSIYA; `DEMO_SHOW_CODE=0` bilan o'chiriladi va haqiqiy SMS yuboriladi).
+
+**Himoya choralari:** parollar PBKDF2-SHA256 (tuz bilan) ko'rinishida; 5 ta xato paroldan keyin hisob 5 daqiqaga bloklanadi;
+30 daqiqa faolsizlikdan keyin sessiya tugaydi; barcha kirish/o'zgarishlar jurnalga yoziladi; oxirgi adminni o'chirib bo'lmaydi.
+Bu o'quv prototipi darajasidagi himoya: real tizimda rasmiy identifikatsiya (yagona kirish yoki elektron imzo), audit va
+shifrlangan ma'lumotlar bazasi talab qilinadi.
+
+**Muhim:** foydalanuvchilar `data/users.db` (SQLite) faylida saqlanadi (`AUTH_DB_PATH` bilan o'zgartiriladi). Streamlit Cloud'da
+fayl tizimi vaqtinchalik: sayt qayta ishga tushganda yaratilgan hisoblar yo'qoladi, faqat Secrets'dagi admin qayta yaratiladi.
+Doimiy hisoblar kerak bo'lsa, dasturni o'z kompyuteringizda (run.bat) ishlating.
+
+## Interfeys va logotip
+- Logotip: original "soliq muhri" (`brand.py`, `assets/`). Rasmiy logotipingiz bo'lsa, `assets/logo_custom.png` (yoki .svg/.jpg/.webp)
+  nomi bilan qo'ying: kirish oynasi, splash, yon panel, fon, PDF va favicon shundan foydalanadi.
+- Ranglar `brand.PALETTE` da (to'q ko'k, oltin, havorang; xavf sinflari: yashil/sariq/qizil). CSS va animatsiyalar `theme.py` da.
+- Kirish oynasi: harakatlanuvchi, bir-biriga ulangan chiziqlar tarmog'i (sichqoncha bilan o'zaro ta'sir) va orqada katta logotip.
+  Kirgandan keyin katta logotipli kutib olish ekrani (~3 soniya), so'ng dastur.
+- Animatsiyalar brauzer JavaScript'i orqali ishlaydi; bloklansa, CSS bilan zaxira fon ko'rinadi, dastur esa to'liq ishlaydi.
+- `.streamlit/config.toml` ixtiyoriy (asosiy mavzu rangi va menyuni yengillashtirish); Streamlit Cloud'da "Add file -> Create new file" da
+  `.streamlit/config.toml` deb yozib yaratiladi. Usiz ham dizayn ishlaydi.

@@ -8,7 +8,7 @@ from ml_model import score_dataset, train_all
 
 def run(n=3000, seed=42, use_existing=False):
     if use_existing:
-        df = pd.read_csv("data/companies.csv", dtype={"stir": str})
+        df = pd.read_csv("data/companies.csv", dtype={"stir": str, "phone": str})
     else:
         df, goods = generate_all(n, seed)
         df.to_csv("data/companies.csv", index=False)

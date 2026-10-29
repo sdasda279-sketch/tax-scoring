@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import auth
+
 from ml_model import explain_local, load_model
 from report import passport_pdf
 from scoring import LABELS, WEIGHTS, recommendations
@@ -28,12 +30,12 @@ RAW_COLS = ["stir", "name", "region", "sector", "legal_form", "years_active", "e
             "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer",
             "has_inventory", "inv_opening_value", "inv_purchases", "inv_closing_value"]
 EMOJI = {"Past xavf": "🟢", "O'rtacha xavf": "🟡", "Yuqori xavf": "🔴"}
-MAX_SUBS = 5
+SESSION_TTL = 12 * 3600  # botdagi kirish 12 soatdan keyin tugaydi
+PENDING_TTL = 300
 RATE_LIMIT = (15, 60)  # 60 soniyada 15 tadan ortiq so'rov emas
 
-COMMANDS = [("start", "Boshlash"), ("tekshir", "STIR bo'yicha tekshirish"), ("demo", "Namuna STIR'lar"),
-            ("obuna", "Korxonaga obuna bo'lish"), ("mening", "Mening obunalarim"),
-            ("bekor", "Obunani bekor qilish"), ("yordam", "Yordam"), ("id", "Mening Telegram ID'im")]
+COMMANDS = [("start", "Boshlash"), ("kirish", "Tizimga kirish (STIR va parol)"), ("mening", "Mening korxonam"),
+            ("chiqish", "Tizimdan chiqish"), ("yordam", "Yordam"), ("id", "Mening Telegram ID'im")]
 
 def esc(s):
     return html.escape(str(s), quote=False)  # faqat & < > ekranlanadi (Telegram HTML uchun yetarli)
@@ -66,12 +68,15 @@ class Bot:
         self.admins = {str(a) for a in admins}
         self.by_stir = {s: i for i, s in enumerate(self.df["stir"])}
         self.state_path = Path(state_path)
-        self.state = {"subs": {}, "alerted": []}
+        self.state = {"sessions": {}, "alerted": []}
         if self.state_path.exists():
             try:
                 self.state = json.loads(self.state_path.read_text())
             except Exception:
                 pass
+        self.state.setdefault("sessions", {})
+        self.state.setdefault("alerted", [])
+        self.pending = {}
         self.hits = defaultdict(deque)
 
     # ---------------- Telegram transporti ----------------
@@ -120,7 +125,7 @@ class Bot:
     def company_buttons(self, stir):
         return [[{"text": "📄 PDF pasport", "callback_data": f"pdf:{stir}"},
                  {"text": "🔍 Nima uchun?", "callback_data": f"why:{stir}"}],
-                [{"text": "🔔 Obuna bo'lish", "callback_data": f"sub:{stir}"}]]
+                ]
 
     def show_company(self, chat, stir):
         r = self.df.iloc[self.by_stir[stir]]
@@ -138,14 +143,46 @@ class Bot:
                      f"{'xavfni oshirmoqda' if d > 0 else 'xavfni kamaytirmoqda'} ({d:+.1f} foiz punkti)")
         return "\n".join(L) if len(L) > 2 else "Aniq bir omil ajralib turmaydi."
 
-    def subscribe(self, chat, stir):
-        subs = self.state["subs"].setdefault(str(chat), [])
-        if stir in subs:
-            return self.send(chat, "Siz bu korxonaga allaqachon obuna bo'lgansiz.")
-        if len(subs) >= MAX_SUBS:
-            return self.send(chat, f"Bir foydalanuvchi eng ko'pi bilan {MAX_SUBS} ta korxonaga obuna bo'la oladi.")
-        subs.append(stir); self.save()
-        self.send(chat, "🔔 Obuna qilindi. Korxona xavf sinfi <b>yuqori</b> bo'lsa, sizga ogohlantirish yuboriladi.")
+    # ---------------- kirish va ruxsatlar ----------------
+    def is_admin(self, chat) -> bool:
+        return str(chat) in self.admins
+
+    def session_stir(self, chat):
+        """Botda tizimga kirgan korxonaning STIR'i (muddati o'tgan bo'lsa None)."""
+        sess = self.state["sessions"].get(str(chat))
+        if not sess:
+            return None
+        if time.time() - sess["ts"] > SESSION_TTL:
+            self.state["sessions"].pop(str(chat), None); self.save()
+            return None
+        return sess["stir"]
+
+    def allowed(self, chat, stir) -> bool:
+        return self.is_admin(chat) or self.session_stir(chat) == stir
+
+    def delete_msg(self, chat, mid):
+        if mid:
+            try:
+                self.api("deleteMessage", chat_id=chat, message_id=mid)
+            except Exception:
+                pass
+
+    def handle_login_step(self, chat, text, mid):
+        p = self.pending.get(chat)
+        if p["step"] == "stir":
+            if not re.fullmatch(r"\d{9}", text):
+                return self.send(chat, "STIR 9 xonali raqam bo'lishi kerak. Qayta kiriting yoki /bekor.")
+            self.pending[chat] = {"step": "pw", "stir": text, "ts": time.time()}
+            return self.send(chat, "Endi <b>parolni</b> yuboring. Xavfsizlik uchun parol yozilgan xabar darhol o'chiriladi.")
+        self.delete_msg(chat, mid)  # parol chatda qolmasligi uchun
+        self.pending.pop(chat, None)
+        user, msg = auth.verify(p["stir"], text)
+        if not user or user["role"] != "company" or user["stir"] not in self.by_stir:
+            return self.send(chat, msg or "Bu hisob bot uchun mos emas (bot yuridik shaxslar uchun).")
+        self.state["sessions"][str(chat)] = {"stir": user["stir"], "ts": time.time()}
+        self.save()
+        self.send(chat, "✅ Tizimga kirdingiz.")
+        self.show_company(chat, user["stir"])
 
     # ---------------- xabarlar ----------------
     def handle_update(self, u):
@@ -153,7 +190,7 @@ class Bot:
             return self.handle_callback(u["callback_query"])
         m = u.get("message")
         if m and "text" in m:
-            self.handle_message(m["chat"]["id"], m["text"].strip())
+            self.handle_message(m["chat"]["id"], m["text"].strip(), m.get("message_id"))
 
     def handle_callback(self, cq):
         chat = cq["message"]["chat"]["id"]
@@ -164,71 +201,69 @@ class Bot:
         if self.flooded(chat):
             return self.send(chat, "⏳ So'rovlar juda tez. Bir daqiqadan keyin urinib ko'ring.")
         action, _, stir = cq.get("data", "").partition(":")
-        if stir not in self.by_stir:
-            return self.send(chat, "Korxona topilmadi.")
+        if stir not in self.by_stir or not self.allowed(chat, stir):
+            return self.send(chat, "⛔ Bu ma'lumotni ko'rishga ruxsatingiz yo'q. Avval /kirish orqali kiring.")
         if action == "pdf":
             r = self.df.iloc[self.by_stir[stir]]
             self.send_document(chat, f"soliq_pasporti_{stir}.pdf", passport_pdf(r), "Soliq pasporti (sintetik ma'lumotlar)")
         elif action == "why":
             self.send(chat, self.explain_text(stir))
-        elif action == "sub":
-            self.subscribe(chat, stir)
-        elif action == "check":
-            self.show_company(chat, stir)
 
-    def handle_message(self, chat, text):
+    def handle_message(self, chat, text, mid=None):
         if self.flooded(chat):
+            self.delete_msg(chat, mid) if chat in self.pending else None
             return self.send(chat, "⏳ So'rovlar juda tez. Bir daqiqadan keyin urinib ko'ring.")
+        p = self.pending.get(chat)
+        if p and time.time() - p["ts"] > PENDING_TTL:
+            self.pending.pop(chat, None); p = None
         cmd, _, arg = text.partition(" ")
         cmd, arg = cmd.lower().split("@")[0], arg.strip()
+        if p and not text.startswith("/"):
+            return self.handle_login_step(chat, text, mid)
         if cmd in ("/start", "/yordam", "/help"):
             return self.send(chat, (
-                "Assalomu alaykum! Men <b>Tax Scoring</b> botiman. Korxonaning soliq intizomi va moliyaviy "
+                "Assalomu alaykum! Men <b>Tax Scoring</b> botiman. Korxonangizning soliq intizomi va moliyaviy "
                 "ishonchlilik reytingini ko'rsataman.\n\n"
-                "• 9 xonali <b>STIR</b> yoki korxona nomini yuboring\n• /demo: namuna STIR'lar\n"
-                "• /obuna STIR: yuqori xavf haqida ogohlantirish olish\n• /mening: obunalarim\n• /bekor STIR: obunani bekor qilish\n\n"
+                "• /kirish: STIR va parol bilan kirish (hisob veb-saytda ro'yxatdan o'tganda yaratiladi)\n"
+                "• /mening: korxonamning natijasi\n• /chiqish: tizimdan chiqish\n\n"
+                "Faqat <b>o'z</b> korxonangiz ma'lumotini ko'ra olasiz. Kirgan bo'lsangiz, xavf yuqori bo'lganda sizga ogohlantirish yuboriladi.\n"
                 "⚠️ Barcha ma'lumotlar <b>sintetik</b> (o'quv prototipi)."))
         if cmd == "/id":
             return self.send(chat, f"Sizning Telegram ID: <code>{chat}</code>")
-        if cmd == "/demo":
-            L = ["Namuna korxonalar (STIR'ni nusxalab yuboring):", ""]
-            for cls in ("Yuqori xavf", "O'rtacha xavf", "Past xavf"):
-                sub = self.df[self.df["risk_class"] == cls]
-                if len(sub):
-                    r = sub.iloc[random.randrange(len(sub))]
-                    L.append(f"{EMOJI[cls]} <code>{r['stir']}</code>: {esc(r['name'])}")
-            return self.send(chat, "\n".join(L))
-        if cmd == "/tekshir":
-            return self.lookup(chat, arg) if arg else self.send(chat, "STIR yoki nom kiriting: /tekshir 243785752")
-        if cmd == "/obuna":
-            if arg in self.by_stir:
-                return self.subscribe(chat, arg)
-            return self.send(chat, "Format: /obuna 243785752 (9 xonali STIR)")
-        if cmd == "/mening":
-            subs = self.state["subs"].get(str(chat), [])
-            if not subs:
-                return self.send(chat, "Sizda obunalar yo'q.")
-            return self.send(chat, "\n".join(f"{EMOJI[self.df.iloc[self.by_stir[s]]['risk_class']]} <code>{s}</code> "
-                                             f"{esc(self.df.iloc[self.by_stir[s]]['name'])}" for s in subs))
+        if cmd == "/kirish":
+            self.pending[chat] = {"step": "stir", "ts": time.time()}
+            return self.send(chat, "Korxonangizning <b>STIR</b>ini (9 xonali, bu sizning loginingiz) yuboring. Bekor qilish: /bekor")
         if cmd == "/bekor":
-            subs = self.state["subs"].get(str(chat), [])
-            if arg in subs:
-                subs.remove(arg); self.save()
-                return self.send(chat, "Obuna bekor qilindi.")
-            return self.send(chat, "Format: /bekor 243785752 (obuna bo'lgan STIR)")
+            self.pending.pop(chat, None)
+            return self.send(chat, "Bekor qilindi.")
+        if cmd == "/chiqish":
+            self.pending.pop(chat, None)
+            if self.state["sessions"].pop(str(chat), None):
+                self.save()
+                return self.send(chat, "Tizimdan chiqdingiz.")
+            return self.send(chat, "Siz tizimga kirmagansiz.")
+        if cmd == "/mening":
+            stir = self.session_stir(chat)
+            return self.show_company(chat, stir) if stir else self.send(chat, "Avval /kirish orqali tizimga kiring.")
+        if cmd == "/tekshir" and self.is_admin(chat):
+            return self.lookup(chat, arg) if arg else self.send(chat, "STIR yoki nom kiriting: /tekshir 243785752")
         if cmd in ("/top10", "/statistika", "/yubor"):
             return self.admin(chat, cmd)
         if cmd.startswith("/"):
             return self.send(chat, "Noma'lum buyruq. /yordam ni bosing.")
-        self.lookup(chat, text)
+        stir = self.session_stir(chat)
+        if stir:
+            return self.show_company(chat, stir)
+        self.send(chat, "Ma'lumotni ko'rish uchun avval /kirish orqali tizimga kiring.")
 
     def lookup(self, chat, q):
+        """Faqat Telegram administratorlari uchun: istalgan korxonani qidirish."""
         q = q.strip()
         m = re.search(r"\b\d{9}\b", q)
         if m:
             if m.group() in self.by_stir:
                 return self.show_company(chat, m.group())
-            return self.send(chat, "Bunday STIR topilmadi. Namuna uchun /demo ni bosing.")
+            return self.send(chat, "Bunday STIR topilmadi.")
         if len(q) < 3:
             return self.send(chat, "STIR (9 xonali raqam) yoki kamida 3 harfli nom kiriting.")
         hit = self.df[self.df["name"].str.contains(q, case=False, regex=False)]
@@ -236,9 +271,8 @@ class Bot:
             return self.send(chat, "Hech narsa topilmadi.")
         if len(hit) == 1:
             return self.show_company(chat, hit.iloc[0]["stir"])
-        btn = [[{"text": f"{EMOJI[r['risk_class']]} {r['name']} ({r['stir']})", "callback_data": f"check:{r['stir']}"}]
-               for _, r in hit.head(6).iterrows()]
-        self.send(chat, f"{len(hit)} ta natija topildi (dastlabki {len(btn)} tasi):", btn)
+        self.send(chat, f"{len(hit)} ta natija. Aniqroq nom yoki STIR kiriting:\n" + "\n".join(
+            f"{EMOJI[r['risk_class']]} <code>{r['stir']}</code> {esc(r['name'])}" for _, r in hit.head(6).iterrows()))
 
     # ---------------- admin ----------------
     def admin(self, chat, cmd):
@@ -256,16 +290,16 @@ class Bot:
             return self.send(chat, "<b>Umumiy statistika</b>\n" + f"Korxonalar: {len(d):,}\nO'rtacha ball: {d['final_score'].mean():.1f}\n"
                              + "\n".join(f"{EMOJI[k]} {k}: {vc.get(k, 0)} ({vc.get(k, 0) / len(d):.0%})" for k in EMOJI)
                              + f"\nJami soliq qarzi: {d['tax_debt'].sum() / 1000:,.1f} mlrd so'm\n"
-                             f"Obunachilar: {len(self.state['subs'])}")
-        sent = 0  # /yubor: obuna bo'lgan va yuqori xavfli korxonalar haqida ogohlantirish
-        for ch, stirs in self.state["subs"].items():
-            for s in stirs:
-                key = f"{ch}:{s}"
-                r = self.df.iloc[self.by_stir[s]]
-                if r["risk_class"] == "Yuqori xavf" and key not in self.state["alerted"]:
-                    self.send(ch, "⚠️ <b>Ogohlantirish!</b> Siz kuzatayotgan korxona <b>yuqori xavf</b> guruhida:\n\n" + card(r),
-                              self.company_buttons(s))
-                    self.state["alerted"].append(key); sent += 1
+                             f"Botda kirganlar: {len(self.state['sessions'])}")
+        sent = 0  # /yubor: botda tizimga kirgan va yuqori xavfli korxonalarga ogohlantirish
+        for ch, sess in list(self.state["sessions"].items()):
+            if time.time() - sess["ts"] > SESSION_TTL:
+                continue
+            key = f"{ch}:{sess['stir']}"
+            r = self.df.iloc[self.by_stir[sess["stir"]]]
+            if r["risk_class"] == "Yuqori xavf" and key not in self.state["alerted"]:
+                self.send(ch, "⚠️ <b>Ogohlantirish!</b> Korxonangiz <b>yuqori xavf</b> guruhida:\n\n" + card(r), self.company_buttons(sess["stir"]))
+                self.state["alerted"].append(key); sent += 1
         self.save()
         self.send(chat, f"Yuborilgan ogohlantirishlar: {sent} ta.")
 
@@ -303,7 +337,7 @@ def load_bot():
         Path("data").mkdir(exist_ok=True); Path("models").mkdir(exist_ok=True)
         import main
         main.run()
-    df = pd.read_csv("data/scored_companies.csv", dtype={"stir": str})
+    df = pd.read_csv("data/scored_companies.csv", dtype={"stir": str, "phone": str})
     admins = [a for a in os.environ.get("ADMIN_IDS", "").split(",") if a.strip()]
     return Bot(token, df, load_model(), admins)
 

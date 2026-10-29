@@ -1,6 +1,8 @@
 """Yuridik shaxslarning soliq qarzdorligi va moliyaviy ishonchliligini baholash (Tax Scoring) tizimi.
 Ishga tushirish:  streamlit run app.py"""
 import json
+import os
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -11,11 +13,17 @@ from features import FEATURE_LABELS, SECTOR_INV
 from data_generator import REGIONS, SECTORS, LEGAL
 from ml_model import explain_local, hybrid_100, load_model, predict_pd, score_dataset
 import advisor
+import auth
+import brand
+import theme
 from notifier import build_email, build_sms, channel_ready, dispatch, load_config, sms_segments
 from report import passport_pdf, to_excel
 from scoring import classify, contributions, recommendations, rule_score, to_scale, turnover_verdict
 
-st.set_page_config(page_title="Tax Scoring", page_icon="📊", layout="wide")
+try:
+    st.set_page_config(page_title="Soliq Skoring", page_icon=brand.favicon(), layout="wide")
+except Exception:  # eski Streamlit versiyalarida rasm yo'lini qabul qilmasa
+    st.set_page_config(page_title="Soliq Skoring", page_icon="🏛️", layout="wide")
 
 # ---------- ma'lumotlarni yuklash (yo'q bo'lsa avtomatik yaratiladi) ----------
 def _needs_build():
@@ -38,7 +46,7 @@ if _needs_build():
 @st.cache_data
 def load_scored(file_version):
     """file_version (fayl o'zgargan vaqti) o'zgarsa, kesh yangilanadi."""
-    d = pd.read_csv("data/scored_companies.csv", dtype={"stir": str})
+    d = pd.read_csv("data/scored_companies.csv", dtype={"stir": str, "phone": str})
     if "phone" not in d.columns:  # eski ma'lumot: aloqa ustunlarini STIR'dan hosil qilamiz
         ops = ["90", "91", "93", "94", "95", "97", "98", "99", "33", "88", "77"]
         d["phone"] = ["+998" + ops[int(x[-2:]) % 11] + str(1_000_000 + int(x) % 9_000_000) for x in d["stir"]]
@@ -50,7 +58,7 @@ def load_scored(file_version):
 def load_goods(file_version):
     p = Path("data/goods.csv")
     if p.exists():
-        return pd.read_csv(p, dtype={"stir": str})
+        return pd.read_csv(p, dtype={"stir": str, "phone": str})
     return pd.DataFrame(columns=["stir", "group", "unit", "quantity", "unit_price", "value"])
 
 
@@ -66,6 +74,155 @@ def get_bundle():
 
 goods = load_goods(Path("data/goods.csv").stat().st_mtime if Path("data/goods.csv").exists() else 0)
 df, meta, bundle = load_scored(Path("data/scored_companies.csv").stat().st_mtime), load_meta(), get_bundle()
+
+# ====================================== KIRISH (LOGIN) ======================================
+SESSION_TIMEOUT = 30 * 60  # 30 daqiqa faolsizlikdan keyin sessiya tugaydi
+DEMO_SHOW_CODE = os.environ.get("DEMO_SHOW_CODE", "1") != "0"  # SMS provayder bo'lmaganda kodni ekranda ko'rsatish (simulyatsiya)
+
+
+def _secret(name):
+    v = os.environ.get(name)
+    if v:
+        return v
+    try:
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+@st.cache_resource
+def _bootstrap_admin():
+    auth.bootstrap_admin(_secret("ADMIN_USERNAME") or "admin", _secret("ADMIN_PASSWORD"))
+    return True
+
+
+def _send_registration_sms(phone, code):
+    """SMS provayder sozlangan bo'lsa, kodni haqiqiy yuboradi; aks holda (False, sabab)."""
+    cfg = load_config(st.secrets)
+    if not channel_ready("SMS", cfg):
+        return False, "SMS provayder sozlanmagan."
+    try:
+        from notifier import _eskiz_token, send_sms
+        send_sms(phone, f"Tax Scoring tasdiqlash kodi: {code}", cfg, _eskiz_token(cfg))
+        return True, ""
+    except Exception as e:
+        return False, f"SMS yuborilmadi: {str(e)[:80]}"
+
+
+def auth_gate():
+    _bootstrap_admin()
+    a = st.session_state.get("auth")
+    now = time.time()
+    if a and now - a["last"] > SESSION_TIMEOUT:
+        st.session_state.clear()
+        a = None
+        st.warning("Xavfsizlik uchun sessiya tugadi. Qayta kiring.")
+    if a:
+        a["last"] = now
+        return a
+
+    theme.login_screen()  # tungi fon, harakatlanuvchi tarmoq chiziqlari, katta logotip
+    if not auth.has_admin():
+        st.warning("Tizimda hali administrator yo'q. Birinchi administratorni yarating.")
+        st.caption("Sozlash kodi server konsolida (terminal oynasida yoki Streamlit Cloud: Manage app → logs) "
+                   "«[AUTH] Birinchi sozlash kodi» satrida chiqadi. Ommaviy saytda buning o'rniga Secrets'ga "
+                   "ADMIN_USERNAME va ADMIN_PASSWORD yozing.")
+        auth.setup_code()
+        with st.form("setup"):
+            code = st.text_input("Sozlash kodi")
+            u = st.text_input("Administrator logini", value="admin")
+            p = st.text_input("Parol", type="password")
+            p2 = st.text_input("Parolni takrorlang", type="password")
+            go = st.form_submit_button("Administratorni yaratish")
+        if go:
+            if not auth.check_setup_code(code):
+                st.error("Sozlash kodi noto'g'ri.")
+            elif p != p2:
+                st.error("Parollar mos kelmadi.")
+            else:
+                ok, msg = auth.create_user(u, p, "admin")
+                (st.success if ok else st.error)(msg + (" Endi kirishingiz mumkin." if ok else ""))
+                if ok:
+                    st.rerun()
+        st.stop()
+
+    tab_in, tab_reg = st.tabs(["🔐 Kirish", "🏢 Yuridik shaxs: ro'yxatdan o'tish"])
+    with tab_in:
+        st.caption("Inspektor/administrator: o'z logini. Yuridik shaxs: login = STIR.")
+        with st.form("login"):
+            lu = st.text_input("Login")
+            lp = st.text_input("Parol", type="password")
+            go = st.form_submit_button("Kirish", type="primary")
+        if go:
+            user, msg = auth.verify(lu, lp)
+            if user:
+                st.session_state["auth"] = {**user, "last": time.time()}
+                st.session_state["splash"] = True  # keyingi sahifada katta logotip chiqadi
+                st.rerun()
+            else:
+                st.error(msg)
+    with tab_reg:
+        st.caption("Korxona rahbari STIR bo'yicha hisob yaratadi. Shaxs korxonaning ro'yxatdan o'tgan telefon raqamiga "
+                   "yuborilgan bir martalik kod bilan tasdiqlanadi.")
+        reg = st.session_state.get("reg")
+        if not reg:
+            with st.form("reg1"):
+                stir_in = st.text_input("STIR (9 xonali)")
+                go1 = st.form_submit_button("Tasdiqlash kodini yuborish")
+            if go1:
+                sv = (stir_in or "").strip()
+                hit = df[df["stir"] == sv] if (sv.isdigit() and len(sv) == 9) else df.iloc[0:0]
+                if hit.empty:
+                    st.error("Bu STIR bazada topilmadi.")
+                elif auth.get_user(sv):
+                    st.warning("Bu korxona uchun hisob allaqachon mavjud: «Kirish» bo'limidan kiring.")
+                else:
+                    state = auth.issue_code(sv)
+                    phone = hit.iloc[0]["phone"]
+                    sent = False
+                    if not DEMO_SHOW_CODE:
+                        sent, why = _send_registration_sms(phone, state["code"])
+                        if not sent:
+                            st.error("Kodni yuborib bo'lmadi. " + why)
+                    if DEMO_SHOW_CODE or sent:
+                        st.session_state["reg"] = {"state": state, "phone": phone, "name": hit.iloc[0]["name"]}
+                        st.rerun()
+        else:
+            st.info(f"**{reg['name']}**: kod {auth.mask_phone(reg['phone'])} raqamiga yuborildi (amal qilish muddati 5 daqiqa).")
+            if DEMO_SHOW_CODE:
+                st.warning(f"🧪 SMS simulyatsiyasi (provayder ulanmagan): tasdiqlash kodi **{reg['state']['code']}**")
+            with st.form("reg2"):
+                code_in = st.text_input("Tasdiqlash kodi")
+                pw1 = st.text_input("Yangi parol (kamida 8 belgi, harf va raqam)", type="password")
+                pw2 = st.text_input("Parolni takrorlang", type="password")
+                go2 = st.form_submit_button("Hisobni yaratish", type="primary")
+            if go2:
+                ok, msg = auth.check_code(reg["state"], code_in)
+                if not ok:
+                    st.error(msg)
+                elif pw1 != pw2:
+                    st.error("Parollar mos kelmadi.")
+                else:
+                    ok, msg = auth.create_user(reg["state"]["stir"], pw1, "company", reg["state"]["stir"])
+                    if ok:
+                        auth.log("ro'yxatdan o'tdi (kod bilan tasdiqlandi)", reg["state"]["stir"])
+                        st.session_state.pop("reg", None)
+                        st.success("Hisob yaratildi. «Kirish» bo'limida login sifatida STIR'ingizni kiriting.")
+                    else:
+                        st.error(msg)
+            if st.button("Bekor qilish", key="reg_cancel"):
+                st.session_state.pop("reg", None)
+                st.rerun()
+    st.stop()
+
+
+user = auth_gate()
+role = user["role"]
+IS_STAFF = role in ("admin", "inspector")
+theme.apply_base()
+if st.session_state.pop("splash", False):
+    theme.splash(user["username"])
+
 RAW_COLS = ["stir", "name", "region", "sector", "legal_form", "years_active", "employees", "revenue",
             "net_profit", "total_assets", "equity", "current_assets", "current_liabilities", "tax_accrued",
             "tax_debt", "late_payments_count", "avg_delay_days", "late_reports_count", "audit_violations", "vat_payer",
@@ -99,21 +256,38 @@ def view(d, cols):
     return v.rename(columns=COL_UZ)
 
 
-st.sidebar.title("📊 Tax Scoring")
-st.sidebar.caption("Yuridik shaxslarning soliq qarzdorligi va moliyaviy ishonchliligini baholash axborot tizimi")
-page = st.sidebar.radio("Bo'lim", ["Dashboard", "Korxonani tekshirish (STIR)", "Tovar qoldig'i va aylanma manbasi",
+theme.sidebar_header(user["username"], auth.ROLES[role])
+STAFF_PAGES = ["Dashboard", "Korxonani tekshirish (STIR)", "Tovar qoldig'i va aylanma manbasi",
                                    "Yangi korxona (what-if)",
                                    "Korxonalar ro'yxati", "Erta ogohlantirish", "Ogohlantirish yuborish",
-                                   "Modellar taqqoslash", "Raqamlar izohi", "Tizim haqida"])
+                                   "Modellar taqqoslash", "Raqamlar izohi", "Tizim haqida"]
+PAGES = ["Mening korxonam", "Raqamlar izohi"] if role == "company" else STAFF_PAGES + (["Foydalanuvchilar"] if role == "admin" else [])
+if st.sidebar.button("🚪 Chiqish"):
+    auth.log("chiqish", user["username"])
+    st.session_state.clear()
+    st.rerun()
+with st.sidebar.expander("🔑 Parolni o'zgartirish"):
+    with st.form("chpw", clear_on_submit=True):
+        old_pw = st.text_input("Joriy parol", type="password")
+        new_pw = st.text_input("Yangi parol", type="password")
+        go_pw = st.form_submit_button("O'zgartirish")
+    if go_pw:
+        ok_pw, msg_pw = auth.change_own_password(user["username"], old_pw, new_pw)
+        (st.success if ok_pw else st.error)(msg_pw)
+page = st.sidebar.radio("Bo'lim", PAGES, format_func=theme.nav_label, label_visibility="collapsed")
+if page not in PAGES:  # himoya: ruxsatsiz bo'limga o'tishga yo'l qo'yilmaydi
+    st.error("Bu bo'limga ruxsat yo'q.")
+    st.stop()
 st.sidebar.info("Barcha ma'lumotlar sintetik (sun'iy) — o'quv maqsadida yaratilgan.")
-with st.sidebar.expander("🤖 AI sozlamalari"):
-    st.checkbox("AI yoqilgan", value=True, key="ai_on")
-    st.text_input("Claude API kaliti (ixtiyoriy)", type="password", key="ai_key_input",
-                  help="Faqat shu sessiyada saqlanadi. Ommaviy saytda kalitni kodga emas, Secrets orqali bering.")
-    if advisor.load_ai_config(st.secrets, st.session_state.get("ai_key_input", "")).get("key"):
-        st.success("Kalit topildi: Claude AI ishlaydi.")
-    else:
-        st.info("Kalit yo'q: qolipli maslahatchi ishlaydi.")
+if IS_STAFF:
+    with st.sidebar.expander("🤖 AI sozlamalari"):
+        st.checkbox("AI yoqilgan", value=True, key="ai_on")
+        st.text_input("Claude API kaliti (ixtiyoriy)", type="password", key="ai_key_input",
+                      help="Faqat shu sessiyada saqlanadi. Ommaviy saytda kalitni kodga emas, Secrets orqali bering.")
+        if advisor.load_ai_config(st.secrets, st.session_state.get("ai_key_input", "")).get("key"):
+            st.success("Kalit topildi: Claude AI ishlaydi.")
+        else:
+            st.info("Kalit yo'q: qolipli maslahatchi ishlaydi.")
 
 
 def show_company(r: pd.Series, raw_row: pd.DataFrame):
@@ -152,7 +326,7 @@ def show_ai_result(res):
     st.caption(f"Rejim: {res['mode']} · {advisor.DISCLAIMER}")
 
 
-def advisor_section(r, raw_row):
+def advisor_section(r, raw_row, staff=True):
     """Korxona kartochkasi ostidagi AI maslahatchi: reja, savol-javob, inspektor yordamchisi."""
     stir = r["stir"]
     st.divider()
@@ -176,7 +350,8 @@ def advisor_section(r, raw_row):
             st.session_state["ai_calls"] = st.session_state.get("ai_calls", 0) + 1
         return res
 
-    t1, t2, t3 = st.tabs(["📋 Maslahat va 30/60/90 reja", "💬 Savol-javob", "🔎 Inspektor yordamchisi"])
+    tabs_ = st.tabs(["📋 Maslahat va 30/60/90 reja", "💬 Savol-javob"] + (["🔎 Inspektor yordamchisi"] if staff else []))
+    t1, t2 = tabs_[0], tabs_[1]
     with t1:
         sim = pd.DataFrame(facts["simulyatsiya"])
         if len(sim):
@@ -212,14 +387,55 @@ def advisor_section(r, raw_row):
                         st.warning("⚠️ " + w)
                     if m["role"] == "assistant":
                         st.caption(f"Rejim: {m['mode']}")
-    with t3:
-        st.caption("Ichki xulosa inspektor uchun: bu shubha signali va tekshiruv savollari, ayblov emas.")
-        if st.button("🔎 Inspektor xulosasini tayyorlash", key=f"insp_btn_{stir}"):
-            st.session_state[f"insp_{stir}"] = run("inspector")
-        if f"insp_{stir}" in st.session_state:
-            show_ai_result(st.session_state[f"insp_{stir}"])
+    if staff:
+        with tabs_[2]:
+            st.caption("Ichki xulosa inspektor uchun: bu shubha signali va tekshiruv savollari, ayblov emas.")
+            if st.button("🔎 Inspektor xulosasini tayyorlash", key=f"insp_btn_{stir}"):
+                st.session_state[f"insp_{stir}"] = run("inspector")
+            if f"insp_{stir}" in st.session_state:
+                show_ai_result(st.session_state[f"insp_{stir}"])
     with st.expander("Maslahatchi tayanadigan tekshirilgan ma'lumotlar"):
         st.json(facts)
+
+
+def inventory_detail(r):
+    """Tovar balansi, aylanma manbasi, tovar guruhlari va ballga ta'siri (bitta korxona uchun)."""
+    if r["has_inventory"] != 1:
+        st.info(f"«{r['sector']}» tarmog'ida tovar qoldig'i hisobi yuritilmaydi. Shu sababli aylanma manbasi "
+                "ko'rsatkichlari hisoblanmaydi va ballga ta'sir qilmaydi, korxona bu uchun jazolanmaydi.")
+    else:
+        markup, norm = SECTOR_INV[r["sector"]]
+        a, b, c, d_ = st.columns(4)
+        a.metric("Boshlang'ich qoldiq", f"{r['inv_opening_value']:,.1f}", help="mln so'm")
+        b.metric("Kirim (xarid)", f"{r['inv_purchases']:,.1f}", help="mln so'm")
+        c.metric("Oxirgi qoldiq", f"{r['inv_closing_value']:,.1f}", help="mln so'm, yil oxiriga")
+        d_.metric("Sotilgan tovar tannarxi", f"{r['inv_cogs']:,.1f}", help="boshlang'ich + kirim − oxirgi qoldiq")
+        a, b, c = st.columns(3)
+        a.metric("Kutilgan aylanma", f"{r['expected_revenue']:,.1f}", help=f"tannarx × (1 + {markup:.0%} tarmoq ustamasi)")
+        b.metric("Deklaratsiya qilingan aylanma", f"{r['revenue']:,.1f}")
+        c.metric("Aylanma farqi", f"{r['turnover_gap']:+.1%}", help="(deklaratsiya − kutilgan) / kutilgan")
+        level, text = turnover_verdict(r["turnover_gap"])
+        {"ok": st.success, "warn": st.warning, "bad": st.error}[level](text)
+
+        left, right = st.columns([3, 2])
+        left.subheader("Aylanma manbasi")
+        left.pyplot(plots.turnover_source(r))
+        gt = goods[goods["stir"] == r["stir"]].copy()
+        right.subheader("Qoldiq tovar guruhlari")
+        if len(gt):
+            gt["Ulushi, %"] = (gt["value"] / gt["value"].sum() * 100).round(1)
+            gt = gt.drop(columns="stir").rename(columns={
+                "group": "Tovar guruhi", "unit": "O'lchov", "quantity": "Miqdor",
+                "unit_price": "Birlik narxi (so'm)", "value": "Summa (mln so'm)"})
+            right.dataframe(gt, hide_index=True, use_container_width=True)
+            right.caption(f"Jami qoldiq: {r['inv_closing_value']:,.2f} mln so'm · {len(gt)} ta tovar guruhi")
+        st.subheader("Ballga ta'siri")
+        a, b, c = st.columns(3)
+        a.metric("Aylanma manbasi: qismiy ball", f"{r['sub_source']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_source'])}%")
+        b.metric("Qoldiq aylanuvchanligi: qismiy ball", f"{r['sub_stock']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_stock'])}%")
+        c.metric("Yakuniy ball", f"{r['final_score']:.1f} / 100")
+        st.caption(f"Tarmoq o'rtacha ustamasi {markup:.0%}. Qoldiq tovar o'rtacha {r['stock_days']:.0f} kunda sotiladi "
+                   f"(tarmoq me'yori ≈ {norm} kun).")
 
 
 # ---------------------------------- DASHBOARD ----------------------------------
@@ -281,42 +497,7 @@ elif page == "Tovar qoldig'i va aylanma manbasi":
                 r = df.loc[idx]
                 st.header(f"{r['name']}  ·  STIR {r['stir']}")
                 st.caption(f"{r['region']} · {r['sector']}")
-                if r["has_inventory"] != 1:
-                    st.info(f"«{r['sector']}» tarmog'ida tovar qoldig'i hisobi yuritilmaydi. Shu sababli aylanma manbasi "
-                            "ko'rsatkichlari hisoblanmaydi va ballga ta'sir qilmaydi, korxona bu uchun jazolanmaydi.")
-                else:
-                    markup, norm = SECTOR_INV[r["sector"]]
-                    a, b, c, d_ = st.columns(4)
-                    a.metric("Boshlang'ich qoldiq", f"{r['inv_opening_value']:,.1f}", help="mln so'm")
-                    b.metric("Kirim (xarid)", f"{r['inv_purchases']:,.1f}", help="mln so'm")
-                    c.metric("Oxirgi qoldiq", f"{r['inv_closing_value']:,.1f}", help="mln so'm, yil oxiriga")
-                    d_.metric("Sotilgan tovar tannarxi", f"{r['inv_cogs']:,.1f}", help="boshlang'ich + kirim − oxirgi qoldiq")
-                    a, b, c = st.columns(3)
-                    a.metric("Kutilgan aylanma", f"{r['expected_revenue']:,.1f}", help=f"tannarx × (1 + {markup:.0%} tarmoq ustamasi)")
-                    b.metric("Deklaratsiya qilingan aylanma", f"{r['revenue']:,.1f}")
-                    c.metric("Aylanma farqi", f"{r['turnover_gap']:+.1%}", help="(deklaratsiya − kutilgan) / kutilgan")
-                    level, text = turnover_verdict(r["turnover_gap"])
-                    {"ok": st.success, "warn": st.warning, "bad": st.error}[level](text)
-
-                    left, right = st.columns([3, 2])
-                    left.subheader("Aylanma manbasi")
-                    left.pyplot(plots.turnover_source(r))
-                    gt = goods[goods["stir"] == r["stir"]].copy()
-                    right.subheader("Qoldiq tovar guruhlari")
-                    if len(gt):
-                        gt["Ulushi, %"] = (gt["value"] / gt["value"].sum() * 100).round(1)
-                        gt = gt.drop(columns="stir").rename(columns={
-                            "group": "Tovar guruhi", "unit": "O'lchov", "quantity": "Miqdor",
-                            "unit_price": "Birlik narxi (so'm)", "value": "Summa (mln so'm)"})
-                        right.dataframe(gt, hide_index=True, use_container_width=True)
-                        right.caption(f"Jami qoldiq: {r['inv_closing_value']:,.2f} mln so'm · {len(gt)} ta tovar guruhi")
-                    st.subheader("Ballga ta'siri")
-                    a, b, c = st.columns(3)
-                    a.metric("Aylanma manbasi: qismiy ball", f"{r['sub_source']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_source'])}%")
-                    b.metric("Qoldiq aylanuvchanligi: qismiy ball", f"{r['sub_stock']:.0f} / 100", help=f"Balldagi vazni: {int(r['w_stock'])}%")
-                    c.metric("Yakuniy ball", f"{r['final_score']:.1f} / 100")
-                    st.caption(f"Tarmoq o'rtacha ustamasi {markup:.0%}. Qoldiq tovar o'rtacha {r['stock_days']:.0f} kunda sotiladi "
-                               f"(tarmoq me'yori ≈ {norm} kun).")
+                inventory_detail(r)
     with tab2:
         secs = st.multiselect("Tarmoq", sorted(inv_df["sector"].unique()))
         sub = inv_df[inv_df["sector"].isin(secs)] if secs else inv_df
@@ -498,6 +679,87 @@ elif page == "Modellar taqqoslash":
     g = df.groupby("risk_class")["default_next_year"].agg(["count", "mean"]).reindex(list(plots.COLORS))
     g.columns = ["Korxonalar soni", "Xavfli qarzdorlik ulushi"]
     st.dataframe(g.style.format({"Xavfli qarzdorlik ulushi": "{:.1%}"}), use_container_width=True)
+
+# ---------------------------------- MENING KORXONAM (yuridik shaxs) ----------------------------------
+elif page == "Mening korxonam":
+    mine = df[df["stir"] == user["stir"]]  # faqat o'z korxonasi: boshqa STIR so'rab bo'lmaydi
+    if mine.empty:
+        st.error("Sizning STIR bo'yicha korxona ma'lumotlar bazasida topilmadi. Administratorga murojaat qiling.")
+        st.stop()
+    idx = mine.index[0]
+    r = df.loc[idx]
+    st.title(r["name"])
+    st.caption(f"STIR {r['stir']} · {r['region']} · {r['sector']} · {r['legal_form']} · {r['years_active']} yil")
+    show_company(r, df.loc[[idx], RAW_COLS])
+    st.download_button("📄 Soliq pasportini yuklab olish (PDF)", passport_pdf(r),
+                       file_name=f"soliq_pasporti_{r['stir']}.pdf", mime="application/pdf")
+    with st.expander("📦 Tovar qoldig'i va aylanma manbasi"):
+        inventory_detail(r)
+    advisor_section(r, df.loc[[idx], RAW_COLS], staff=False)
+
+# ---------------------------------- FOYDALANUVCHILAR (admin) ----------------------------------
+elif page == "Foydalanuvchilar":
+    if role != "admin":
+        st.error("Bu bo'lim faqat administrator uchun.")
+        st.stop()
+    st.title("Foydalanuvchilarni boshqarish")
+    tl, ti, tc, tm, tj = st.tabs(["Ro'yxat", "Inspektor yaratish", "Korxona hisobi yaratish", "Parol va holat", "Jurnal"])
+    with tl:
+        ulist = auth.list_users()
+        st.dataframe(pd.DataFrame(ulist).rename(columns={
+            "login": "Login", "rol": "Rol", "stir": "STIR", "faol": "Faol", "bloklangan": "Bloklangan",
+            "yaratilgan": "Yaratilgan", "oxirgi_kirish": "Oxirgi kirish"}), hide_index=True, use_container_width=True)
+    with ti:
+        with st.form("new_insp", clear_on_submit=True):
+            nu = st.text_input("Inspektor logini", help="3-32 belgi: kichik harf, raqam, nuqta, pastki chiziq, chiziqcha")
+            npw = st.text_input("Boshlang'ich parol", type="password")
+            nrole = st.selectbox("Rol", ["inspector", "admin"], format_func=lambda x: auth.ROLES[x])
+            go = st.form_submit_button("Yaratish")
+        if go:
+            ok, msg = auth.create_user(nu, npw, nrole)
+            (st.success if ok else st.error)(msg)
+    with tc:
+        st.caption("Korxona o'zi ro'yxatdan o'tmagan bo'lsa (masalan, namoyish uchun), hisobni shu yerda yaratish mumkin. Login = STIR.")
+        with st.form("new_comp", clear_on_submit=True):
+            cs = st.text_input("Korxona STIR'i (9 xonali)")
+            cpw = st.text_input("Boshlang'ich parol", type="password")
+            go = st.form_submit_button("Yaratish")
+        if go:
+            if cs.strip() not in set(df["stir"]):
+                st.error("Bu STIR bazada topilmadi.")
+            else:
+                ok, msg = auth.create_user(cs.strip(), cpw, "company", cs.strip())
+                (st.success if ok else st.error)(msg)
+    with tm:
+        names = [u["login"] for u in auth.list_users()]
+        sel = st.selectbox("Foydalanuvchi", names, key="adm_sel")
+        npw2 = st.text_input("Yangi parol", type="password", key="adm_pw")
+        c1, c2, c3 = st.columns(3)
+        if c1.button("Parolni o'zgartirish"):
+            ok, msg = auth.set_password(sel, npw2)
+            (st.success if ok else st.error)(msg)
+        if c2.button("Blokdan chiqarish"):
+            auth.unlock(sel)
+            st.success("Blokdan chiqarildi.")
+        row = auth.get_user(sel)
+        if row and c3.button("Faolsizlantirish" if row["active"] else "Faollashtirish"):
+            if sel == user["username"]:
+                st.error("O'z hisobingizni faolsizlantirib bo'lmaydi.")
+            else:
+                ok, msg = auth.set_active(sel, not row["active"])
+                (st.success if ok else st.error)(msg)
+        st.divider()
+        sure = st.checkbox("Tanlangan foydalanuvchini o'chirishni tasdiqlayman", key="adm_del_ok")
+        if st.button("🗑️ O'chirish", disabled=not sure):
+            if sel == user["username"]:
+                st.error("O'z hisobingizni o'chirib bo'lmaydi.")
+            else:
+                ok, msg = auth.delete_user(sel)
+                (st.success if ok else st.error)(msg)
+    with tj:
+        st.caption("Oxirgi 50 ta hodisa (kirish, xato urinishlar, bloklash, hisob o'zgarishlari).")
+        st.dataframe(pd.DataFrame(auth.recent_events(50)).rename(columns={"ts": "Vaqt", "username": "Login", "event": "Hodisa"}),
+                     hide_index=True, use_container_width=True)
 
 # ---------------------------------- RAQAMLAR IZOHI ----------------------------------
 elif page == "Raqamlar izohi":
